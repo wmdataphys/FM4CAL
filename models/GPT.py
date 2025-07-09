@@ -90,8 +90,8 @@ class CrossAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, 
-                e_embed, 
+    def forward(self, x,
+                e_embed,
                 attn_mask=None,
                 key_padding_mask=None,
                 need_weights=False):

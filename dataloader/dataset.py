@@ -45,6 +45,13 @@ class ECAL_Dataset(Dataset):
         sorted_positions = np.argsort(tokens)[::-1]
         sorted_energies = tokens[sorted_positions]
 
+        # Cut sequence at first energy bin with value 1
+        cut_index = np.argmax(sorted_energies == 1)
+        if sorted_energies[cut_index] != 1:
+            cut_index = len(sorted_energies)  # no cut needed
+        sorted_energies = sorted_energies[:cut_index]
+        sorted_positions = sorted_positions[:cut_index]
+
         sorted_positions = np.insert(sorted_positions, 0, self.SOS_token)
         sorted_positions = np.append(sorted_positions, self.EOS_token)
         sorted_energies = np.insert(sorted_energies, 0, self.SOS_token)
