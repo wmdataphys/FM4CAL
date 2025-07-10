@@ -1,5 +1,37 @@
 import numpy as np
 import h5py
+import torch
+import torch.nn as nn
+
+
+def energy_loss_fn(true_energies, pred_energies, padding_mask):
+    """
+    Computes SmoothL1Loss for energy regression from ECAL simulated data.
+
+    Parameters:
+    - true_energies: Tensor of shape (B, T)
+    - pred_energies: Tensor of shape (B, T, 1) or (B, T)
+    - padding_mask: Bool tensor of shape (B, T) where True = pad (ignored)
+
+    Returns:
+    - Scalar loss (float)
+    """
+
+    # Make sure shapes are compatible
+    true_energies = true_energies.view(-1).float()
+    pred_energies = pred_energies.view(-1).float()
+
+    # Convert padding mask to 0 for pad, 1 for valid
+    valid_mask = ~padding_mask.view(-1)
+
+    # Compute unreduced SmoothL1 loss
+    loss = nn.SmoothL1Loss(reduction='none')(pred_energies, true_energies)
+
+    # Mask out padded positions
+    loss = loss * valid_mask
+
+    # Average only over non-padded elements
+    return loss.sum() / valid_mask.sum()
 
 
 def map_3d_to_1d(i, j, k, shape=(30, 30, 30)):
@@ -59,3 +91,13 @@ def decompress_hdf5_to_dense(filename):
             energy[i] = grp.attrs["initial_energy"]
 
     return energy, layers
+
+
+def log_vram_usage(tag=""):
+    torch.cuda.synchronize()
+    allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+    reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+    peak_allocated = torch.cuda.max_memory_allocated() / (1024 ** 2)
+
+    print(f"VRAM_LOG,{tag},{allocated:.2f},{reserved:.2f},{peak_allocated:.2f}")
+    return allocated, reserved, peak_allocated

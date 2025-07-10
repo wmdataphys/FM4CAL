@@ -307,9 +307,17 @@ class TransformerBlock(nn.Module):
 
 
 class ECAL_GPT(nn.Module):
-    def __init__(self, vocab_size, seq_len, embed_dim, attn_heads=[2, 4, 2], kin_size=2,
-                num_blocks=2, hidden_units=128, digitize_energy=True, mlp_scale: int = 2,
-                energy_vocab: int = 6234, space_vocab=27003, drop_rates=[0.0, 0.0, 0.0],
+    def __init__(self,
+                 vocab_size,
+                 seq_len,
+                embed_dim, attn_heads=[2, 4, 2],
+                num_blocks=2,
+                hidden_units=128,
+                digitize_energy=True,
+                mlp_scale: int = 2,
+                energy_vocab: int = 6234,
+                space_vocab=27003,
+                drop_rates=[0.0, 0.0, 0.0],
                 detokenize_func=None,
                 classification=False,
                 sequence_level=False,
@@ -335,11 +343,24 @@ class ECAL_GPT(nn.Module):
         self.pos_embedding = nn.Embedding(seq_len, embed_dim)
         self.energy_pos_embedding = nn.Embedding(seq_len, embed_dim)
         self.initial_energy_embedding = nn.Linear(1, embed_dim)
+        self.device = device
         # Can refactor this - fine for now
-        layers_ = [CATransformerBlock(embed_dim, attn_heads[0], mlp_scale, drop_rate=drop_rates[0], use_MoE=self.use_MoE,
-                                      num_experts=self.num_experts, num_classes=self.num_classes)]
-        layers_ += [TransformerBlock(embed_dim, attn_heads[i], mlp_scale, drop_rate=drop_rates[i], use_MoE=self.use_MoE,
-                                     num_experts=self.num_experts, num_classes=self.num_classes) for i in range(1, len(attn_heads))] 
+        layers_ = [CATransformerBlock(embed_dim,
+                                      attn_heads[0],
+                                      mlp_scale,
+                                      drop_rate=drop_rates[0],
+                                      use_MoE=self.use_MoE,
+                                      num_experts=self.num_experts,
+                                      num_classes=self.num_classes,
+                                      device=self.device)]
+        layers_ += [TransformerBlock(embed_dim,
+                                     attn_heads[i],
+                                     mlp_scale,
+                                     drop_rate=drop_rates[i],
+                                     use_MoE=self.use_MoE,
+                                     num_experts=self.num_experts,
+                                     num_classes=self.num_classes,
+                                     device=self.device) for i in range(1, len(attn_heads))]
         self.layers = nn.ModuleList(layers_)
         self.LN = nn.LayerNorm(embed_dim)
 
@@ -370,7 +391,6 @@ class ECAL_GPT(nn.Module):
 
             self.sequence_head = nn.Linear(embed_dim, 1)
 
-        self.device = device
         self.SOS_token = 0
         self.EOS_token = space_vocab - 2  # 6232
         self.pad_token = space_vocab - 1  # 6233
@@ -381,16 +401,18 @@ class ECAL_GPT(nn.Module):
         seq_len = x.shape[1]
         batch_size = x.shape[0]
         pos = torch.arange(0, seq_len, dtype=torch.long, device=x.device).unsqueeze(0)
-
         if not self.digitize_energy:
             e = e.reshape(-1, 1)  # [batch_size * seq_len, 1]
             e_embed_flat = self.energy_embedding(e)
-            e_embed = e_embed_flat.view(batch_size, seq_len, e_embed_flat.shape[-1])  # [batch_size, seq_len,embed_dim]
+            e_embed = e_embed_flat.view(batch_size, seq_len, e_embed_flat.shape[-1])  # [batch_size, seq_len, embed_dim]
             e_embed = e_embed + self.energy_pos_embedding(pos)
         else:
             e_embed = self.energy_embedding(e) + self.energy_pos_embedding(pos)
 
-        initial_energy_embed = self.initial_energy_embedding(initial_energy.unsqueeze(-1)).unsqueeze(1)
+        # Ensure initial_energy is 1D before embedding
+        initial_energy = initial_energy.unsqueeze(1)  # [batch_size, 1]
+
+        initial_energy_embed = self.initial_energy_embedding(initial_energy).unsqueeze(1)
         x = self.token_embedding(x) + self.pos_embedding(pos)
         e_embed = torch.cat((initial_energy_embed, e_embed), dim=1)  # Make sure to concat initial energy here
         x = torch.cat((initial_energy_embed, x), dim=1)
@@ -398,8 +420,8 @@ class ECAL_GPT(nn.Module):
         # Instead of adding time and position embeddings, combine through Cross attention
         # Query from time space, given space (key,value)
         if padding_mask is not None:
-            kinematic_mask = torch.zeros(batch_size, initial_energy.shape[-1], dtype=torch.bool, device=x.device)  # No masking for kinematic tokens
-            padding_mask = torch.cat((kinematic_mask, padding_mask), dim=1) 
+            energy_mask = torch.zeros(batch_size, initial_energy.shape[-1], dtype=torch.bool, device=x.device)  # No masking for kinematic tokens
+            padding_mask = torch.cat((energy_mask, padding_mask), dim=1)
 
         if self.classification and not self.sequence_level:
             cls_tokens = self.cls_token.expand(batch_size, -1, -1)

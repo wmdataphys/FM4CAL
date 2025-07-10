@@ -19,12 +19,12 @@ class ECAL_Dataset(Dataset):
 
         self.SOS_token = 0
         # Positional Tokens 1-27000
-        self.EOS_token = max_seq_length + 1  # 27001
+        self.EOS_token = 27000 + 1  # 27001
         self.pad_token = self.EOS_token + 1  # 27002
 
         # Energy tokens
-        self.energy_EOS_token = len(energy_digitizer.e_bins) + 1
-        self.energy_pad_token = len(energy_digitizer.e_bins) + 2
+        self.energy_EOS_token = 24938 + 1
+        self.energy_pad_token = 24938 + 2
 
         return
 
@@ -35,7 +35,7 @@ class ECAL_Dataset(Dataset):
         key = self.keys[idx]
         group = self.file[key]
 
-        initial_energy = group.attrs["initial_energy"]
+        initial_energy = group.attrs["initial_energy"].item()
         indices = group["indices"][()]  # (N, 3)
         values = group["values"][()]  # (N,)
 

@@ -43,6 +43,19 @@ def CreateECALLoaders(train_dataset, val_dataset, config):
     return train_loader, val_loader
 
 
+def CreateLoadersMoE(train_dataset, val_dataset, config):
+    train_loader = DataLoader(train_dataset,
+                            batch_size=config['dataloader']['train']['batch_size_MoE'],
+                            shuffle=True, collate_fn=ECAL_collate_fn, num_workers=config['dataloader']['train']['num_workers'],
+                            pin_memory=False)
+    val_loader = DataLoader(val_dataset,
+                            batch_size=config['dataloader']['val']['batch_size_MoE'],
+                            shuffle=False, collate_fn=ECAL_collate_fn, num_workers=config['dataloader']['val']['num_workers'],
+                            pin_memory=False)
+
+    return train_loader, val_loader
+
+
 if __name__ == '__main__':
     from dataset import ECAL_Dataset
     from tokenizer import EnergyTokenizer
