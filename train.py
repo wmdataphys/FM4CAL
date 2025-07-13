@@ -116,12 +116,20 @@ def main(config, resume, distributed):
     history = {'train_loss': [], 'val_loss': [], 'lr': []}
     run_val = True
 
-    net = ECAL_GPT(vocab_size, msl, embed_dim, attn_heads=attn_heads,
-            num_blocks=num_blocks, hidden_units=hidden_units,
-            digitize_energy=digitize_energy, mlp_scale=mlp_scale,
-            energy_vocab=energy_vocab, drop_rates=drop_rates, use_MoE=use_MoE,
-            num_experts=num_experts, num_classes=num_classes,
-            device=device)
+    net = ECAL_GPT(vocab_size,
+                   msl,
+                   embed_dim,
+                   attn_heads=attn_heads,
+                num_blocks=num_blocks,
+                hidden_units=hidden_units,
+                digitize_energy=digitize_energy,
+                mlp_scale=mlp_scale,
+                energy_vocab=energy_vocab,
+                drop_rates=drop_rates,
+                use_MoE=use_MoE,
+                num_experts=num_experts,
+                num_classes=num_classes,
+                device=device)
 
     if device.type == 'cuda':
         if not distributed:

@@ -7,20 +7,20 @@
   },
   "dataset": {
     "training": {
-      "data_path": "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/photon-shower-0_corrected_compressed.hdf5"
+      "data_path": "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/train"
     },
     "validation": {
-      "data_path": "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/photon-shower-0_corrected_compressed.hdf5"
+      "data_path": "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/val"
     }
   },
   "model": {
     "vocab_size": 27003,
     "energy_vocab": 24941,
-    "embed_dim": 64,
+    "embed_dim": 256,
     "attn_heads": [8,8,8],
     "num_blocks": 2,
-    "hidden_units": 64,
-    "mlp_scale": 4,
+    "hidden_units": 128,
+    "mlp_scale": 2,
     "drop_rates": [0.0, 0.0, 0.0],
     "max_seq_length": 1700,
     "use_MoE": false,

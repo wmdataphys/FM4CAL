@@ -9,7 +9,8 @@ class ECAL_Dataset(Dataset):
 
     def __init__(self, data_path,
                  max_seq_length=27000,
-                 energy_digitizer=None):
+                 energy_digitizer=None,
+                 in_memory = True):
 
         # Constant shape per shot
         self.shape = (30, 30, 30)
@@ -28,7 +29,26 @@ class ECAL_Dataset(Dataset):
         self.energy_EOS_token = 24938 + 1
         self.energy_pad_token = 24938 + 2
 
+        self.in_memory = in_memory
+
+        if self.in_memory:
+            self.memory_cache = self._load_all_into_memory()
+
+        self.current_file = None
+        self.current_data = {}  # maps local idx → (indices, values, energy)
+
         return
+
+    def _load_all_into_memory(self):
+        cache = []
+        for file_path, key in self.index_map:
+            with h5py.File(file_path, "r") as f:
+                group = f[key]
+                indices = group["indices"][()]
+                values = group["values"][()]
+                initial_energy = group.attrs["initial_energy"].item()
+                cache.append((indices, values, initial_energy))
+        return cache
 
     def _gather_file_paths(self, data_path):
         if os.path.isdir(data_path):
@@ -40,15 +60,16 @@ class ECAL_Dataset(Dataset):
 
     def _build_index(self):
         index = []
+        self.file_to_keys = {}
         for file_path in self.file_paths:
+            keys = []
             with h5py.File(file_path, "r") as f:
                 for key in f.keys():
                     group = f[key]
                     if "indices" in group and "values" in group and "initial_energy" in group.attrs:
-                        index.append((file_path, key))
-                    else:
-                        print(f"Skipping: {file_path}, group '{key}' missing required fields.")
-
+                        keys.append(key)
+            self.file_to_keys[file_path] = keys
+            index.extend([(file_path, key) for key in keys])  # global idx: (file, index_in_file)
         print(f"Total valid samples indexed: {len(index)}")
         return index
 
@@ -56,15 +77,26 @@ class ECAL_Dataset(Dataset):
         return len(self.index_map)
 
     def __getitem__(self, idx):
-        file_path, key = self.index_map[idx]
+        if self.in_memory:
+            indices, values, initial_energy = self.memory_cache[idx]
+        else:
+            file_path, key = self.index_map[idx]
 
-        with h5py.File(file_path, "r") as f:
-            group = f[key]
-            indices = group["indices"][()]      # (N, 3)
-            values = group["values"][()]        # (N,)
-            initial_energy = group.attrs["initial_energy"].item()
+            # If the file is not loaded, load it
+            if file_path != self.current_file:
+                self.current_file = file_path
+                self.current_data = {}  # Clear cache
+                with h5py.File(file_path, "r") as f:
+                    for i, key in enumerate(self.file_to_keys[file_path]):
+                        group = f[key]
+                        indices = group["indices"][()]
+                        values = group["values"][()]
+                        energy = group.attrs["initial_energy"].item()
+                        self.current_data[i] = (indices, values, energy)
 
-        # Tokenization
+            indices, values, initial_energy = self.current_data[key]
+
+        # Tokenization 
         if self.energy_digitizer is None:
             raise ValueError("Energy digitizer must be provided for tokenization.")
 
