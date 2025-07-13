@@ -1,6 +1,8 @@
 from torch.utils.data import Dataset
 import numpy as np
 import h5py
+import os
+import glob
 
 
 class ECAL_Dataset(Dataset):
@@ -11,11 +13,11 @@ class ECAL_Dataset(Dataset):
 
         # Constant shape per shot
         self.shape = (30, 30, 30)
-        self.file = h5py.File(data_path, "r")
-        # Each key is an event index (0, 1 ...)
-        self.keys = list(self.file.keys())
         self.max_seq_length = max_seq_length
         self.energy_digitizer = energy_digitizer
+
+        self.file_paths = self._gather_file_paths(data_path)
+        self.index_map = self._build_index()
 
         self.SOS_token = 0
         # Positional Tokens 1-27000
@@ -28,32 +30,62 @@ class ECAL_Dataset(Dataset):
 
         return
 
+    def _gather_file_paths(self, data_path):
+        if os.path.isdir(data_path):
+            return sorted(glob.glob(os.path.join(data_path, "*.hdf5")))
+        elif os.path.isfile(data_path):
+            return [data_path]
+        else:
+            raise FileNotFoundError(f"No valid files found at {data_path}")
+
+    def _build_index(self):
+        index = []
+        for file_path in self.file_paths:
+            with h5py.File(file_path, "r") as f:
+                for key in f.keys():
+                    group = f[key]
+                    if "indices" in group and "values" in group and "initial_energy" in group.attrs:
+                        index.append((file_path, key))
+                    else:
+                        print(f"Skipping: {file_path}, group '{key}' missing required fields.")
+
+        print(f"Total valid samples indexed: {len(index)}")
+        return index
+
     def __len__(self):
-        return len(self.keys)
+        return len(self.index_map)
 
     def __getitem__(self, idx):
-        key = self.keys[idx]
-        group = self.file[key]
+        file_path, key = self.index_map[idx]
 
-        initial_energy = group.attrs["initial_energy"].item()
-        indices = group["indices"][()]  # (N, 3)
-        values = group["values"][()]  # (N,)
+        with h5py.File(file_path, "r") as f:
+            group = f[key]
+            indices = group["indices"][()]      # (N, 3)
+            values = group["values"][()]        # (N,)
+            initial_energy = group.attrs["initial_energy"].item()
 
-        if self.energy_digitizer is not None:
-            tokens = self.energy_digitizer.tokenize((indices, values))
+        # Tokenization
+        if self.energy_digitizer is None:
+            raise ValueError("Energy digitizer must be provided for tokenization.")
 
+        tokens = self.energy_digitizer.tokenize((indices, values))
+
+        # Sort by energy (descending)
         sorted_positions = np.argsort(tokens)[::-1]
         sorted_energies = tokens[sorted_positions]
 
-        # Cut sequence at first energy bin with value 1
+        # Cut sequence at first token with energy bin == 1
         cut_index = np.argmax(sorted_energies == 1)
         if sorted_energies[cut_index] != 1:
-            cut_index = len(sorted_energies)  # no cut needed
-        sorted_energies = sorted_energies[:cut_index]
-        sorted_positions = sorted_positions[:cut_index]
+            cut_index = len(sorted_energies)
 
+        sorted_positions = sorted_positions[:cut_index]
+        sorted_energies = sorted_energies[:cut_index]
+
+        # Add SOS/EOS tokens
         sorted_positions = np.insert(sorted_positions, 0, self.SOS_token)
         sorted_positions = np.append(sorted_positions, self.EOS_token)
+
         sorted_energies = np.insert(sorted_energies, 0, self.SOS_token)
         sorted_energies = np.append(sorted_energies, self.energy_EOS_token)
 
