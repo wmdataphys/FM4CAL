@@ -206,7 +206,7 @@ class MHSA(nn.Module):
         self.d_k = self.head_dim ** -0.5
         self.device = device
         self.qk_norm = qk_norm
-        self.g_scale = nn.Parameter(torch.tensor(1.0/self.d_k, dtype=torch.float, device=self.device), requires_grad=True)
+        self.g_scale = nn.Parameter(torch.tensor(1.0 / self.d_k, dtype=torch.float, device=self.device), requires_grad=True)
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
@@ -225,7 +225,7 @@ class MHSA(nn.Module):
         q = q.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        # normalize QK matrices with L2 norm over head dim, learnable scale init to d_k 
+        # normalize QK matrices with L2 norm over head dim, learnable scale init to d_k
         if self.qk_norm:
             k = F.normalize(k, p=2, dim=-1)
             q = F.normalize(q, p=2, dim=-1)
@@ -268,7 +268,7 @@ class TransformerBlock(nn.Module):
         self.attn = MHSA(self.embed_dim, self.num_heads, dropout=self.drop_rate, device=self.device)
         self.c_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
         self.LN2 = nn.LayerNorm(self.embed_dim)
-    
+
         if self.use_MoE:
             self.num_experts = num_experts
             self.num_classes = num_classes
@@ -310,7 +310,8 @@ class ECAL_GPT(nn.Module):
     def __init__(self,
                  vocab_size,
                  seq_len,
-                embed_dim, attn_heads=[2, 4, 2],
+                embed_dim,
+                attn_heads=[2, 4, 2],
                 num_blocks=2,
                 hidden_units=128,
                 digitize_energy=True,

@@ -1,17 +1,20 @@
 import torch
 import numpy as np
 from torch.utils.data import DataLoader
+from functools import partial
 
 
-def ECAL_collate_fn(batch):
+def ECAL_collate_fn(batch, max_seq_length=1700):
     positions, energies, initial_energies = zip(*batch)
 
-    max_len = max(len(p) for p in positions)
+    max_len = min(max(len(p) for p in positions), max_seq_length)
 
     padded_positions = []
     padded_energies = []
 
     for pos, en in zip(positions, energies):
+        pos = pos[:max_len]
+        en = en[:max_len]
         pad_len = max_len - len(pos)
         padded_positions.append(
             torch.tensor(np.pad(pos, (0, pad_len), constant_values=27002))  # pad_token
@@ -28,16 +31,18 @@ def ECAL_collate_fn(batch):
 
 
 def CreateECALLoaders(train_dataset, val_dataset, config):
+
+    collate_fn = partial(ECAL_collate_fn, max_seq_length=config['model']['max_seq_length'])
     train_loader = DataLoader(train_dataset,
                             batch_size=config['dataloader']['train']['batch_size'],
                             shuffle=True,
-                            collate_fn=ECAL_collate_fn,
+                            collate_fn=collate_fn,
                             num_workers=config['dataloader']['train']['num_workers'],
                             pin_memory=False)
     val_loader = DataLoader(val_dataset,
                             batch_size=config['dataloader']['val']['batch_size'],
                             shuffle=False,
-                            collate_fn=ECAL_collate_fn,
+                            collate_fn=collate_fn,
                             num_workers=config['dataloader']['val']['num_workers'],
                             pin_memory=False)
     return train_loader, val_loader

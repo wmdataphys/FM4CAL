@@ -89,16 +89,18 @@ def main(config, resume, distributed):
 
         data_path = config['dataset']['training']['data_path']
         val_data_path = config['dataset']['validation']['data_path']
+        in_memory = config['dataset']['in_memory']
 
-        train_dataset = ECAL_Dataset(data_path=data_path, max_seq_length=msl, energy_digitizer=energy_digitizer)
-        val_dataset = ECAL_Dataset(data_path=val_data_path, max_seq_length=msl, energy_digitizer=energy_digitizer)
+        train_dataset = ECAL_Dataset(data_path=data_path, max_seq_length=msl, energy_digitizer=energy_digitizer, in_memory=in_memory)
+        val_dataset = ECAL_Dataset(data_path=val_data_path, max_seq_length=msl, energy_digitizer=energy_digitizer, in_memory=in_memory)
         train_loader, val_loader = CreateLoadersMoE(train_dataset, val_dataset, config)
     else:
         data_path = config['dataset']['training']['data_path']
         val_data_path = config['dataset']['validation']['data_path']
+        in_memory = config['dataset']['in_memory']
 
-        train_dataset = ECAL_Dataset(data_path=data_path, max_seq_length=msl, energy_digitizer=energy_digitizer)
-        val_dataset = ECAL_Dataset(data_path=val_data_path, max_seq_length=msl, energy_digitizer=energy_digitizer)
+        train_dataset = ECAL_Dataset(data_path=data_path, max_seq_length=msl, energy_digitizer=energy_digitizer, in_memory=in_memory)
+        val_dataset = ECAL_Dataset(data_path=val_data_path, max_seq_length=msl, energy_digitizer=energy_digitizer, in_memory=in_memory)
         train_loader, val_loader = CreateECALLoaders(train_dataset, val_dataset, config)
 
     pad_token = train_dataset.pad_token
@@ -183,7 +185,7 @@ def main(config, resume, distributed):
     for epoch in range(startEpoch, num_epochs):
 
         kbar = pkbar.Kbar(target=len(train_loader), epoch=epoch, num_epochs=num_epochs, width=20, always_stateful=False)
-
+        val_kbar = pkbar.Kbar(target=len(val_loader), epoch=epoch, num_epochs=num_epochs, width=20, always_stateful=False)
         ###################
         #  Training loop  #
         ###################
@@ -251,7 +253,7 @@ def main(config, resume, distributed):
         ######################
         if run_val:
             net.eval()
-            val_time_loss = 0.0
+            val_energy_loss = 0.0
             val_pixel_loss = 0.0
             for i, data in enumerate(val_loader):
                 tokens = data[0].to(device).long()
@@ -277,7 +279,7 @@ def main(config, resume, distributed):
                 padding_mask = (tokens == pad_token).to(device, dtype=torch.bool)
 
                 with torch.no_grad():
-                    logits, t = net(tokens, energies, initial_energy, class_label=class_label, padding_mask=padding_mask)
+                    logits, e = net(tokens, energies, initial_energy, class_label=class_label, padding_mask=padding_mask)
 
                 # Slice off the prepended initial energy token
                 logits = logits[:, 1:, :]
@@ -287,7 +289,7 @@ def main(config, resume, distributed):
                     regression_mask = ~torch.isin(next_tokens, torch.tensor([pad_token, SOS_token, EOS_token], device=next_tokens.device))
                     val_energy_loss += energy_loss_fn(next_energies, e, regression_mask)
                 else:
-                    val_energy_loss += energy_ce(t.reshape(-1, t.size(-1)), next_energies.reshape(-1))
+                    val_energy_loss += energy_ce(e.reshape(-1, e.size(-1)), next_energies.reshape(-1))
 
                 val_pixel_loss += loss_fn(logits.reshape(-1, logits.size(-1)), next_tokens.reshape(-1))
 
@@ -297,7 +299,7 @@ def main(config, resume, distributed):
 
             kbar.add(1, values=[("Val_loss", val_loss.item()),
                                 ("val_pix", val_pixel_loss.item()),
-                                ("val_energy", val_time_loss.item())])
+                                ("val_energy", val_energy_loss.item())])
 
             name_output_file = config['name'] + '_epoch{:02d}_val_loss_{:.6f}.pth'.format(epoch, val_loss)
 

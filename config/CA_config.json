@@ -3,7 +3,7 @@
   "seed": 42,
   "digitize_energy": true,
   "output": {
-    "dir": "outputs"
+    "dir": "Trained_Models"
   },
   "dataset": {
     "training": {
@@ -11,7 +11,8 @@
     },
     "validation": {
       "data_path": "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/val"
-    }
+    },
+    "in_memory": true
   },
   "model": {
     "vocab_size": 27003,
@@ -35,7 +36,7 @@
   "optimizer": {
     "lr": 1e-4
   },
-  "num_epochs": 1,
+  "num_epochs": 100,
   "num_epochs_MoE": 1,
   "batch_size": 2,
   "val_batch_size": 2,

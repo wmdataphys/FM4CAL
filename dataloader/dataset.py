@@ -64,7 +64,7 @@ class ECAL_Dataset(Dataset):
         for file_path in self.file_paths:
             keys = []
             with h5py.File(file_path, "r") as f:
-                for key in f.keys():
+                for key in sorted(f.keys()):
                     group = f[key]
                     if "indices" in group and "values" in group and "initial_energy" in group.attrs:
                         keys.append(key)
@@ -80,23 +80,23 @@ class ECAL_Dataset(Dataset):
         if self.in_memory:
             indices, values, initial_energy = self.memory_cache[idx]
         else:
-            file_path, key = self.index_map[idx]
+            file_path, index = self.index_map[idx]
 
             # If the file is not loaded, load it
             if file_path != self.current_file:
                 self.current_file = file_path
                 self.current_data = {}  # Clear cache
                 with h5py.File(file_path, "r") as f:
-                    for i, key in enumerate(self.file_to_keys[file_path]):
+                    for key in self.file_to_keys[file_path]:
                         group = f[key]
                         indices = group["indices"][()]
                         values = group["values"][()]
                         energy = group.attrs["initial_energy"].item()
-                        self.current_data[i] = (indices, values, energy)
+                        self.current_data[key] = (indices, values, energy)  # store by group name
 
-            indices, values, initial_energy = self.current_data[key]
+            indices, values, initial_energy = self.current_data[index]
 
-        # Tokenization 
+        # Tokenization
         if self.energy_digitizer is None:
             raise ValueError("Energy digitizer must be provided for tokenization.")
 
