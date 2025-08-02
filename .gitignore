@@ -24,3 +24,5 @@ data/
 # Ignore notebook folders
 notebooks/
 notebook/
+*/.ipynb_checkpoints/
+.ipynb_checkpoints/

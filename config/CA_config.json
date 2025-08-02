@@ -2,17 +2,20 @@
   "name": "ecal_test",
   "seed": 42,
   "digitize_energy": true,
+  "use_amp": true,
   "output": {
-    "dir": "Trained_Models"
+    "dir": "/sciclone/home/cjgranger/FM4CAL/Trained_Models"
   },
   "dataset": {
     "training": {
-      "data_path": "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/train"
+      "data_path": "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/train",
+      "index_cache_path":"/sciclone/home/cjgranger/FM4CAL/ecal_train_index_cache.pkl"
     },
     "validation": {
-      "data_path": "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/val"
+      "data_path": "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/val",
+      "index_cache_path":"/sciclone/home/cjgranger/FM4CAL/ecal_val_index_cache.pkl"
     },
-    "in_memory": true
+    "in_memory": "in_memory"
   },
   "model": {
     "vocab_size": 27003,
@@ -34,7 +37,10 @@
     "energy_res": 0.0035
   },
   "optimizer": {
-    "lr": 1e-4
+    "lr": 1e-4,
+    "lr_cls": 0.001,
+    "weight_decay": 0.0,
+    "alpha": 0.001
   },
   "num_epochs": 100,
   "num_epochs_MoE": 1,
@@ -43,14 +49,14 @@
   "num_workers": 0,
   "dataloader": {
     "train": {
-      "batch_size": 2,
+      "batch_size": 16,
       "shuffle": true,
-      "num_workers": 0
+      "num_workers": 4
     },
     "val": {
-        "batch_size": 2,
+        "batch_size": 16,
         "shuffle": false,
-        "num_workers": 0
+        "num_workers": 4
     }
   }
 }

@@ -28,11 +28,11 @@ class EnergyTokenizer():
             flat_indices = np.ravel_multi_index(indices.T, shape)
             flat_array = np.zeros(np.prod(shape), dtype=values.dtype)
             flat_array[flat_indices] = values
-            return np.digitize(flat_array, self.e_bins) + 1  # Offset so SOS = 0
+            return np.digitize(flat_array, self.e_bins)  # Offset so SOS = 0
 
         # Dense array, (30, 30, 30)
         if isinstance(energies, np.ndarray):
-            return np.digitize(energies.flatten(), self.e_bins) + 1  # Offset so SOS = 0
+            return np.digitize(energies.flatten(), self.e_bins)  # Offset so SOS = 0
 
         else:
             raise ValueError("Unsupported input format for tokenization")

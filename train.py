@@ -4,16 +4,18 @@ import torch.optim as optim
 from torch.optim import lr_scheduler
 import torch.nn.functional as F
 from torch.nn.parallel import DataParallel
+from torch.cuda.amp import autocast, GradScaler
+import time
 
 from utils.utils import energy_loss_fn
 
+import logging
 import os
 import json
 import argparse
 import random
 import numpy as np
 import pkbar
-import math
 import warnings
 from datetime import datetime
 
@@ -26,8 +28,9 @@ from models.GPT import ECAL_GPT
 warnings.filterwarnings("ignore", message=".*weights_only.*")
 
 
-def main(config, resume, distributed):
+def main(config, resume, distributed, use_amp=True):
 
+    use_amp = config['use_amp']
     # Setup random seed
     torch.manual_seed(config['seed'])
     np.random.seed(config['seed'])
@@ -40,7 +43,6 @@ def main(config, resume, distributed):
 
     if device.type == 'cuda':
         torch.cuda.manual_seed(config['seed'])
-
 
     # Create experiment name
     curr_date = datetime.now()
@@ -98,9 +100,19 @@ def main(config, resume, distributed):
         data_path = config['dataset']['training']['data_path']
         val_data_path = config['dataset']['validation']['data_path']
         in_memory = config['dataset']['in_memory']
+        index_cache_path = config['dataset']['training']['index_cache_path']
+        val_index_cache_path = config['dataset']['validation']['index_cache_path']
 
-        train_dataset = ECAL_Dataset(data_path=data_path, max_seq_length=msl, energy_digitizer=energy_digitizer, in_memory=in_memory)
-        val_dataset = ECAL_Dataset(data_path=val_data_path, max_seq_length=msl, energy_digitizer=energy_digitizer, in_memory=in_memory)
+        train_dataset = ECAL_Dataset(data_path=data_path,
+                                    max_seq_length=msl,
+                                    energy_digitizer=energy_digitizer,
+                                    in_memory=in_memory,
+                                    index_cache_path=index_cache_path)
+        val_dataset = ECAL_Dataset(data_path=val_data_path,
+                                  max_seq_length=msl,
+                                  energy_digitizer=energy_digitizer,
+                                  in_memory=in_memory,
+                                  index_cache_path=val_index_cache_path)
         train_loader, val_loader = CreateECALLoaders(train_dataset, val_dataset, config)
 
     pad_token = train_dataset.pad_token
@@ -156,6 +168,10 @@ def main(config, resume, distributed):
     # No need for warmup
     optimizer = torch.optim.RAdam(list(filter(lambda p: p.requires_grad, net.parameters())), lr=lr)
 
+    # AMP usage
+    if use_amp:
+        scaler = GradScaler()
+
     startEpoch = 0
     global_step = 0
 
@@ -185,66 +201,111 @@ def main(config, resume, distributed):
     for epoch in range(startEpoch, num_epochs):
 
         kbar = pkbar.Kbar(target=len(train_loader), epoch=epoch, num_epochs=num_epochs, width=20, always_stateful=False)
-        val_kbar = pkbar.Kbar(target=len(val_loader), epoch=epoch, num_epochs=num_epochs, width=20, always_stateful=False)
         ###################
         #  Training loop  #
         ###################
         net.train()
         running_loss = 0.0
 
-        for i, data in enumerate(train_loader):
-            tokens = data[0].to(device).long()
+        log_path = os.path.join(output_folder, exp_name, 'timing_log.txt')
+        with open(log_path, 'a') as timing_log:
+            timing_log.write(f"\n--- Epoch {epoch} ---\n")
 
-            if use_MoE:
-                class_label = data[-1].to(device).float()
-            else:
-                class_label = None
+            batch_start = time.time()
+            for i, data in enumerate(train_loader):
+                data_load_time = time.time() - batch_start
+                torch.cuda.synchronize()
+                fwd_bwd_start = time.time()
 
-            next_tokens = tokens[:, 1:].clone()
-            tokens = tokens[:, :-1]
+                tokens = data[0].to(device).long()
 
-            if not digitize_energy:
-                energies = data[1].to(device).float()
-            else:
-                energies = data[1].to(device).long()
+                if use_MoE:
+                    class_label = data[-1].to(device).float()
+                else:
+                    class_label = None
 
-            next_energies = energies[:, 1:].clone()
-            energies = energies[:, :-1]
+                next_tokens = tokens[:, 1:].clone()
+                tokens = tokens[:, :-1]
 
-            initial_energy = data[2].to(device).float()
+                if not digitize_energy:
+                    energies = data[1].to(device).float()
+                else:
+                    energies = data[1].to(device).long()
 
-            padding_mask = (tokens == pad_token).to(device, dtype=torch.bool)
+                next_energies = energies[:, 1:].clone()
+                energies = energies[:, :-1]
 
-            optimizer.zero_grad()
+                initial_energy = data[2].to(device).float()
 
-            with torch.set_grad_enabled(True):
-                logits, e, load_balance = net(tokens, energies, initial_energy, class_label=class_label, padding_mask=padding_mask)
+                padding_mask = (tokens == pad_token).to(device, dtype=torch.bool)
 
-            # Slice off the prepended initial energy token
-            logits = logits[:, 1:, :]
-            e = e[:, 1:, :]
+                optimizer.zero_grad()
 
-            pixel_loss = loss_fn(logits.reshape(-1, logits.size(-1)), next_tokens.reshape(-1))
+                if use_amp:
+                    with autocast():
+                        logits, e, load_balance = net(tokens, energies, initial_energy,
+                                                    class_label=class_label,
+                                                    padding_mask=padding_mask)
 
-            if not digitize_energy:
-                regression_mask = ~torch.isin(next_tokens, torch.tensor([pad_token, SOS_token, EOS_token], device=next_tokens.device))
-                energy_loss = energy_loss_fn(next_energies, e, regression_mask)
-            else:
-                energy_loss = energy_ce(e.reshape(-1, e.size(-1)), next_energies.reshape(-1))
+                        logits = logits[:, 1:, :]
+                        e = e[:, 1:, :]
 
-            loss = pixel_loss + energy_loss + load_balance
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
-            optimizer.step()
-            # statistics
-            running_loss += loss.item() * tokens.shape[0]
+                        pixel_loss = loss_fn(logits.reshape(-1, logits.size(-1)),
+                                            next_tokens.reshape(-1))
 
-            kbar.update(i, values=[("loss", loss.item()),
-                                   ("pix", pixel_loss.item()),
-                                   ("energy", energy_loss.item()),
-                                   ("load", load_balance.item())])
+                        if not digitize_energy:
+                            regression_mask = ~torch.isin(
+                                next_tokens,
+                                torch.tensor([pad_token, SOS_token, EOS_token],
+                                            device=next_tokens.device)
+                            )
+                            energy_loss = energy_loss_fn(next_energies, e, regression_mask)
+                        else:
+                            energy_loss = energy_ce(e.reshape(-1, e.size(-1)), next_energies.reshape(-1))
 
-            global_step += 1
+                        loss = pixel_loss + energy_loss + load_balance
+                        scaler.scale(loss).backward()
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+                        scaler.step(optimizer)
+                        scaler.update()
+                else:
+                    with torch.set_grad_enabled(True):
+                        logits, e, load_balance = net(tokens, energies, initial_energy, class_label=class_label, padding_mask=padding_mask)
+
+                    # Slice off the prepended initial energy token
+                    logits = logits[:, 1:, :]
+                    e = e[:, 1:, :]
+
+                    pixel_loss = loss_fn(logits.reshape(-1, logits.size(-1)), next_tokens.reshape(-1))
+
+                    if not digitize_energy:
+                        regression_mask = ~torch.isin(next_tokens, torch.tensor([pad_token, SOS_token, EOS_token], device=next_tokens.device))
+                        energy_loss = energy_loss_fn(next_energies, e, regression_mask)
+                    else:
+                        energy_loss = energy_ce(e.reshape(-1, e.size(-1)), next_energies.reshape(-1))
+
+                    loss = pixel_loss + energy_loss + load_balance
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+                    optimizer.step()
+                torch.cuda.synchronize()
+                step_time = time.time() - fwd_bwd_start
+                batch_start = time.time()
+
+                if i % 100 == 0:
+                    log_msg = f"[{i}] data_load: {data_load_time:.3f}s, step: {step_time:.3f}s\n"
+                    timing_log.write(log_msg)
+                    timing_log.flush()
+                # statistics
+                running_loss += loss.item() * tokens.shape[0]
+
+                kbar.update(i, values=[("loss", loss.item()),
+                                    ("pix", pixel_loss.item()),
+                                    ("energy", energy_loss.item()),
+                                    ("load", load_balance.item())])
+
+                global_step += 1
 
         history['train_loss'].append(running_loss / len(train_loader.dataset))
 
