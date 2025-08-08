@@ -9,7 +9,6 @@ from tqdm import tqdm
 
 
 class ECAL_Dataset(Dataset):
-
     def __init__(self, data_path,
                  max_seq_length=27000,
                  energy_digitizer=None,
@@ -179,3 +178,82 @@ class ECAL_Dataset(Dataset):
         sorted_energies = np.append(sorted_energies, self.energy_EOS_token)
 
         return sorted_positions, sorted_energies, initial_energy
+
+
+######################### My Lazy Implementation #########################
+# This is a copy of the ECAL_Dataset class with the same functionality as above.
+# includes easier chunking - you can make this better if you want to.
+class ECAL_Chunked_Dataset(Dataset):
+    def __init__(self, file_list,
+                 max_seq_length=27000,
+                 energy_digitizer=None,verbose=False):
+
+        # Constant shape per shot
+        self.shape = (30, 30, 30)
+        self.max_seq_length = max_seq_length
+        self.energy_digitizer = energy_digitizer
+        self.verbose = verbose
+        self.SOS_token = 0
+        # Positional Tokens 1-27000
+        self.EOS_token = 27000 + 1  # 27001
+        self.pad_token = self.EOS_token + 1  # 27002
+
+        # Energy tokens
+        self.energy_EOS_token = 24938 + 1
+        self.energy_pad_token = 24938 + 2
+
+        self.file_list = file_list
+        self.memory_cache = self._load_all_into_memory()
+
+
+    def _load_all_into_memory(self):
+        if self.energy_digitizer is None:
+            raise ValueError("Energy digitizer must be provided for tokenization.")
+
+        cache = []
+        file_to_groupkeys = {}
+        if self.verbose:
+            print('Loading Files Into Memory...')
+            
+        for file_path in self.file_list:
+            with h5py.File(file_path, "r") as f:
+                for key in f.keys():
+                    group = f[key]
+                    indices = group["indices"][()]
+                    values = group["values"][()]
+                    initial_energy = group.attrs["initial_energy"].item()
+
+                    # Tokenize and sort
+                    tokens = self.energy_digitizer.tokenize((indices, values))
+                    if self.max_seq_length < tokens.size:
+                        topk_idx = np.argpartition(tokens, -self.max_seq_length)[-self.max_seq_length:]
+                        sorted_positions = topk_idx[np.argsort(-tokens[topk_idx])]
+                    else:
+                        sorted_positions = np.argsort(-tokens)
+                    sorted_energies = tokens[sorted_positions]
+
+                    # Trim at first energy == 1
+                    cut_index = np.argmax(sorted_energies == 1)
+                    if sorted_energies[cut_index] != 1:
+                        cut_index = len(sorted_energies)
+
+                    sorted_positions = sorted_positions[:cut_index]
+                    sorted_energies = sorted_energies[:cut_index]
+
+                    # Add SOS/EOS
+                    sorted_positions = np.insert(sorted_positions, 0, self.SOS_token)
+                    sorted_positions = np.append(sorted_positions, self.EOS_token)
+
+                    sorted_energies = np.insert(sorted_energies, 0, self.SOS_token)
+                    sorted_energies = np.append(sorted_energies, self.energy_EOS_token)
+
+                    cache.append((sorted_positions, sorted_energies, initial_energy))
+
+        return cache
+
+    def __len__(self):
+        return len(self.memory_cache)
+
+    def __getitem__(self, idx):
+        return self.memory_cache[idx]
+        

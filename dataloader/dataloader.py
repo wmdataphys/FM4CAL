@@ -60,6 +60,14 @@ def CreateLoadersMoE(train_dataset, val_dataset, config):
 
     return train_loader, val_loader
 
+def CreateDistLoader(dataset,sampler,batch_size=256,num_workers=8,pin_memory=True,persistent_workers=False):
+    loader = DataLoader(dataset,sampler=sampler,
+                            batch_size=batch_size,
+                            collate_fn=ECAL_collate_fn,
+                            num_workers=num_workers,
+                            pin_memory=pin_memory,persistent_workers=persistent_workers)
+    return loader
+
 
 if __name__ == '__main__':
     from dataset import ECAL_Dataset

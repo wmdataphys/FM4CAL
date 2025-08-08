@@ -4,16 +4,16 @@
   "digitize_energy": true,
   "use_amp": true,
   "output": {
-    "dir": "/sciclone/home/cjgranger/FM4CAL/Trained_Models"
+    "dir": "/sciclone/data10/jgiroux/ECAL_Cole/ECAL_Models"
   },
   "dataset": {
+    "tracks_per_file": 10000,
+    "base_dir":"/sciclone/data10/jgiroux/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/corrected",
     "training": {
-      "data_path": "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/train",
-      "index_cache_path":"/sciclone/home/cjgranger/FM4CAL/ecal_train_index_cache.pkl"
+      "data_path": "/sciclone/home/jgiroux/FM4CAL/train_files.txt"
     },
     "validation": {
-      "data_path": "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/val",
-      "index_cache_path":"/sciclone/home/cjgranger/FM4CAL/ecal_val_index_cache.pkl"
+      "data_path": "/sciclone/home/jgiroux/FM4CAL/val_files.txt"
     },
     "in_memory": "in_memory"
   },
@@ -58,12 +58,14 @@
     "train": {
       "batch_size": 16,
       "shuffle": true,
-      "num_workers": 4
+      "num_workers": 0,
+      "chunk_size": 10
     },
     "val": {
         "batch_size": 16,
         "shuffle": false,
-        "num_workers": 4
+        "num_workers": 0,
+        "chunk_size": 10
     }
   }
 }
