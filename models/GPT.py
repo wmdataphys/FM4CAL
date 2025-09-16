@@ -8,6 +8,11 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
+# Prefer BF16 if your GPU supports it; else FP16 is fine
+AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
 
 class ResNetBlock(nn.Module):
     def __init__(self, hidden_units):
@@ -76,7 +81,7 @@ class CrossAttention(nn.Module):
                  qk_norm=True):
         super().__init__()
 
-        assert embed_dim & num_heads == 0, "embed_dim is indivisible by num_heads"
+        assert embed_dim % num_heads == 0, "embed_dim is indivisible by num_heads"
 
         self.num_heads = num_heads
         self.seq_len = seq_len
@@ -524,13 +529,20 @@ class ECAL_GPT(nn.Module):
         temperature = min_temp + alpha * math.exp(-decay_rate * step)
         return temperature
 
-    @torch.no_grad()
-    def generate(self, inital_energy, class_label=None, max_seq_len: int = 250, context_len=None,
-                 temperature: float = 1.0, method="Default", topK=100, nucleus_p=0.98,
+    @torch()
+    def generate(self,
+                 initial_energy,
+                 class_label=None,
+                 max_seq_len: int = 250,  # Normally 1700, kept at 250 for now
+                 context_len=None,
+                 temperature: float = 1.0,
+                 method="Default",
+                 topK=100,
+                 nucleus_p=0.98,
                  dynamic_temp=False):
 
         assert method in ["Nucleus", "TopK", "Default", "Greedy", "Min_p"]
-        batch_size = inital_energy.shape[0]
+        batch_size = initial_energy.shape[0]
 
         # Start tokens
         idx = torch.zeros(batch_size, 1, device=self.device, dtype=torch.long)  # pixel token
@@ -552,7 +564,7 @@ class ECAL_GPT(nn.Module):
                 idx_cond = idx[:, -context_len:]
                 e_cond = e[:, -context_len:]
 
-            logits, logits_energy = self(idx_cond, e_cond, inital_energy, class_label, padding_mask=None)
+            logits, logits_energy = self(idx_cond, e_cond, initial_energy, class_label, padding_mask=None)
 
             logits = logits[:, -1, :] / temperature
 
