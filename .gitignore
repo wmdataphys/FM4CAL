@@ -27,3 +27,7 @@ notebooks/
 notebook/
 */.ipynb_checkpoints/
 .ipynb_checkpoints/
+.jupyter/
+.ipython/
+.local/
+.cache/

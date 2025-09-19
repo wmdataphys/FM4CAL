@@ -8,7 +8,8 @@ import torch.optim as optim
 from torch.optim import lr_scheduler
 import torch.nn.functional as F
 from torch.nn.parallel import DataParallel
-from torch.amp import autocast, GradScaler
+# ✅ works across 1.10 → 2.x
+from torch.cuda.amp import autocast, GradScaler
 
 import json
 import argparse
@@ -80,7 +81,7 @@ class Trainer:
 
         self.use_amp = config['use_amp']
         if self.use_amp:
-            self.scaler = GradScaler('cuda')
+            self.scaler = GradScaler()
 
         self.use_MoE = bool(config['model']['use_MoE'])
         self.digitize_energy = bool(config['digitize_energy'])
@@ -160,7 +161,7 @@ class Trainer:
             self.optimizer.zero_grad()
 
             if self.use_amp:
-                with autocast(device_type='cuda', dtype=torch.float16):
+                with autocast(dtype=torch.float16):
                     logits, e, load_balance = self.model(tokens, energies, initial_energy, class_label=class_label, padding_mask=padding_mask)
 
                     logits = logits[:, 1:, :]
@@ -418,4 +419,3 @@ if __name__=='__main__':
     config = json.load(open(args.config))
 
     main(config,args.resume)
-

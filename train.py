@@ -18,6 +18,11 @@ import numpy as np
 import pkbar
 import warnings
 from datetime import datetime
+import sys, traceback, faulthandler
+faulthandler.enable(all_threads=True)          # native crashes, deadlocks
+os.environ.setdefault("PYTHONFAULTHANDLER","1")
+os.environ.setdefault("CUDA_LAUNCH_BLOCKING","1")  # sync CUDA to get real stack traces
+os.environ.setdefault("PYTHONUNBUFFERED","1")      # flush prints immediately
 
 from dataloader.dataset import ECAL_Dataset
 from dataloader.tokenizer import EnergyTokenizer
@@ -177,13 +182,16 @@ def main(config, resume, distributed, use_amp=True):
 
     if resume:
         print('===========  Resume training  ==================:')
-        dict = torch.load(resume)
-        net.load_state_dict(dict['net_state_dict'])
-        optimizer.load_state_dict(dict['optimizer'])
-        startEpoch = dict['epoch'] + 1
-        history = dict['history']
-        global_step = dict['global_step']
-
+        map_loc = device if device.type == 'cuda' else 'cpu'
+        ckpt = torch.load(resume, map_location=map_loc)
+        net.load_state_dict(ckpt['net_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer'])
+        startEpoch = ckpt['epoch'] + 1
+        history = ckpt['history']
+        global_step = ckpt['global_step']
+        if use_amp and 'scaler' in ckpt:
+            scaler.load_state_dict(ckpt['scaler'])
+        print(f"Resumed from: {resume} at epoch {startEpoch}, global_step {global_step}")
         print('       ... Start at epoch:', startEpoch)
     else:
         print("========= Starting Training ================:")
@@ -198,8 +206,13 @@ def main(config, resume, distributed, use_amp=True):
         print("Energy vocab: ", energy_pad_token + 1)
         energy_ce = nn.CrossEntropyLoss(ignore_index=energy_pad_token)
 
-    for epoch in range(startEpoch, num_epochs):
+    is_cuda = (device.type == 'cuda')
+    for epoch in range(startEpoch, num_epochs + startEpoch):
+        print('     Starting Training       ')
 
+        assert train_loader is not None, "train_loader is None"
+        tl = len(train_loader)
+        assert tl > 0, "train_loader is empty (len == 0)"
         kbar = pkbar.Kbar(target=len(train_loader), epoch=epoch, num_epochs=num_epochs, width=20, always_stateful=False)
         ###################
         #  Training loop  #
@@ -214,7 +227,8 @@ def main(config, resume, distributed, use_amp=True):
             batch_start = time.time()
             for i, data in enumerate(train_loader):
                 data_load_time = time.time() - batch_start
-                torch.cuda.synchronize()
+                if is_cuda:
+                    torch.cuda.synchronize()
                 fwd_bwd_start = time.time()
 
                 tokens = data[0].to(device).long()
@@ -289,7 +303,8 @@ def main(config, resume, distributed, use_amp=True):
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
                     optimizer.step()
-                torch.cuda.synchronize()
+                if is_cuda:
+                    torch.cuda.synchronize()
                 step_time = time.time() - fwd_bwd_start
                 batch_start = time.time()
 
@@ -371,12 +386,16 @@ def main(config, resume, distributed, use_amp=True):
         filename = os.path.join(output_folder, exp_name, name_output_file)
 
         checkpoint = {}
-        checkpoint['net_state_dict'] = net.state_dict()
+        checkpoint['net_state_dict'] = (
+            net.state_dict() if not isinstance(net, nn.DataParallel) else net.module.state_dict()
+        )
         checkpoint['optimizer'] = optimizer.state_dict()
         checkpoint['epoch'] = epoch
         checkpoint['history'] = history
         checkpoint['global_step'] = global_step
-
+        checkpoint['config'] = config
+        if use_amp:
+            checkpoint['scaler'] = scaler.state_dict()
         torch.save(checkpoint, filename)
 
         print('')
