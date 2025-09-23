@@ -13,10 +13,10 @@ from dataloader.tokenizer import EnergyTokenizer
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-with open("/sciclone/home/cjgranger/FM4CAL/Trained_Models/ecal_test___Jul-24-2025/config.json", "r") as f:
+with open("/sciclone/home/cjgranger/FM4CAL/Trained_Models/ecal_test___Sep-21-2025/config.json", "r") as f:
     config = json.load(f)
 
-model_path = '/sciclone/home/cjgranger/FM4CAL/Trained_Models/ecal_test___Jul-24-2025/ecal_test_epoch99_val_loss_8.982370.pth'
+model_path = '/sciclone/home/cjgranger/FM4CAL/Trained_Models/ecal_test___Sep-21-2025/ecal_test_epoch02_val_loss_0.000531.pth'
 
 vocab_size = config['model']['vocab_size']
 energy_vocab = config['model']['energy_vocab']
@@ -99,7 +99,7 @@ for file_path in os.listdir(val_data):
 # convert list -> tensor on the right device
 energies = torch.tensor(energies, dtype=torch.float32, device=device)
 # sampling_methods = ["Nucleus", "TopK", "Default", "Greedy", "Min_p"]
-sampling_methods = ['Greedy', "Default"]
+sampling_methods = ["Default"]
 
 
 class ShotWriterCompound:
