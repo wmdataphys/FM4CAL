@@ -65,7 +65,9 @@ def CreateDistLoader(dataset,sampler,batch_size=256,num_workers=8,pin_memory=Tru
                             batch_size=batch_size,
                             collate_fn=ECAL_collate_fn,
                             num_workers=num_workers,
-                            pin_memory=pin_memory,persistent_workers=persistent_workers)
+                            pin_memory=pin_memory,
+                            persistent_workers=persistent_workers,
+                            drop_last=True)
     return loader
 
 

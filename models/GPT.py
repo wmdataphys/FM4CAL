@@ -202,13 +202,19 @@ class CATransformerBlock(nn.Module):
         load_balance = torch.tensor([0.0], dtype=torch.float32, device=x.device)  # place holder for non MoE model return
 
         # Not used in this model
-        if not classification:
-            mask_ = self.generate_mask(N_t)
-            attn, attn_weights = self.attn(x_norm, e_norm, attn_mask=mask_, key_padding_mask=padding_mask, need_weights=False)
-        else:
-            attn, attn_weights = self.attn(x_norm, e_norm, key_padding_mask=padding_mask, need_weights=False)
+        # if not classification:
+        #     
+        #     attn, attn_weights = self.attn(x_norm, e_norm, attn_mask=mask_, key_padding_mask=padding_mask, need_weights=False)
+        # else:
+        #     attn, attn_weights = self.attn(x_norm, e_norm, key_padding_mask=paddig_mask, need_weights=False)
 
-        attn_out, kv_ca = self.attn(x_norm, e_norm, key_padding_mask=padding_mask, past_kv=past_kv)
+        mask_ = self.generate_mask(N_t)
+
+        attn_out, kv_ca = self.attn(x_norm,
+                                    e_norm,
+                                    key_padding_mask=padding_mask,
+                                    attn_mask=mask_,
+                                    past_kv=past_kv)
         attn_out = self.c_proj(attn_out)
         x = x + attn_out
 
@@ -217,8 +223,9 @@ class CATransformerBlock(nn.Module):
             x = x + res
         else:
             x = x + self.FF(self.LN2(x))
+            load_balance = torch.zeros((), dtype=torch.float32, device=x.device)
 
-        return x, kv_ca
+        return x, kv_ca, load_balance
 
 
 class MHSA(nn.Module):
@@ -342,7 +349,13 @@ class TransformerBlock(nn.Module):
         # else:
         #     attn, attn_weights = self.attn(x_norm, key_padding_mask=padding_mask, need_weights=need_weights)
 
-        attn_out, kv_mhsa = self.attn(x_norm, key_padding_mask=padding_mask, need_weights=need_weights, past_kv=past_kv)
+        mask_ = self.generate_mask(N_t)
+        attn_out, kv_mhsa = self.attn(
+                                x_norm,
+                                key_padding_mask=padding_mask,
+                                need_weights=need_weights,
+                                attn_mask=mask_,
+                                past_kv=past_kv)
         attn_out = self.c_proj(attn_out)
         x = x + attn_out
 
@@ -351,7 +364,9 @@ class TransformerBlock(nn.Module):
             x = x + res
         else:
             x = x + self.FF(self.LN2(x))
-        return x, kv_mhsa
+            load_balance = torch.zeros((), dtype=torch.float32, device=x.device)
+
+        return x, kv_mhsa, load_balance
 
 
 class ECAL_GPT(nn.Module):
@@ -450,6 +465,7 @@ class ECAL_GPT(nn.Module):
         seq_len = x.shape[1]
         batch_size = x.shape[0]
         pos = torch.arange(0, seq_len, dtype=torch.long, device=x.device).unsqueeze(0)
+
         if not self.digitize_energy:
             e = e.reshape(-1, 1)  # [batch_size * seq_len, 1]
             e_embed_flat = self.energy_embedding(e)
@@ -488,20 +504,20 @@ class ECAL_GPT(nn.Module):
             e_embed = torch.cat((cls_tokens, e_embed), dim=1)
 
         if self.training:
-            load_balance = 0.
+            load_balance = torch.zeros((), dtype=torch.float32, device=x.device)
             for layer in self.layers:
                 if layer.__class__.__name__ == "CATransformerBlock":
-                    x, load = layer(x, e_embed, class_label, padding_mask=padding_mask, classification=self.classification)
+                    x, _kv, load = layer(x, e_embed, class_label, padding_mask=padding_mask, classification=self.classification)
                 else:
-                    x, load = layer(x, class_label, padding_mask=padding_mask, classification=self.classification)
+                    x, _kv, load = layer(x, class_label, padding_mask=padding_mask, classification=self.classification)
                 load_balance += load
 
         else:
             for layer in self.layers:
                 if layer.__class__.__name__ == "CATransformerBlock":
-                    x, _ = layer(x, e_embed, class_label, padding_mask=padding_mask, classification=self.classification)
+                    x, _kv, _lb = layer(x, e_embed, class_label, padding_mask=padding_mask, classification=self.classification)
                 else:
-                    x, _ = layer(x, class_label, padding_mask=padding_mask, classification=self.classification)
+                    x, _kv, _lb = layer(x, class_label, padding_mask=padding_mask, classification=self.classification)
 
         x = self.LN(x)
 
@@ -515,12 +531,10 @@ class ECAL_GPT(nn.Module):
 
             if self.training:
                 return pixel, e_out, load_balance
-
             return pixel, e_out
 
         elif self.classification and not self.sequence_level:
             return self.classification_head(x[:, 0]).squeeze(-1)
-
         else:
             return self.sequence_head(x).squeeze(-1)
 
@@ -545,9 +559,9 @@ class ECAL_GPT(nn.Module):
         new_past = []
         for layer, pkv in zip(self.layers, past_kvs):
             if isinstance(layer, CATransformerBlock):
-                x, kv = layer(x, e_t, class_label, padding_mask=padding_mask, classification=self.classification, past_kv=pkv)
+                x, kv, _lb = layer(x, e_t, class_label, padding_mask=padding_mask, classification=self.classification, past_kv=pkv)
             else:
-                x, kv = layer(x, class_label, padding_mask=padding_mask, classification=self.classification, past_kv=pkv)
+                x, kv, _lb = layer(x, class_label, padding_mask=padding_mask, classification=self.classification, past_kv=pkv)
             new_past.append(kv)
 
         x = self.LN(x)
