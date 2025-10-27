@@ -13,10 +13,10 @@ from dataloader.tokenizer import EnergyTokenizer
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-with open("/sciclone/home/cjgranger/FM4CAL/Trained_Models/ecal_test___Sep-21-2025/config.json", "r") as f:
+with open("/mnt/c/Users/cjgranger/Documents/FM4CAL/Trained_Models/ecal_test___Jul-24-2025/config.json", "r") as f:
     config = json.load(f)
 
-model_path = '/sciclone/home/cjgranger/FM4CAL/Trained_Models/ecal_test___Sep-21-2025/ecal_test_epoch02_val_loss_0.000531.pth'
+model_path = '/mnt/c/Users/cjgranger/Documents/FM4CAL/Trained_Models/ecal_test___Jul-24-2025/ecal_test_epoch99_val_loss_8.982370.pth'
 
 vocab_size = config['model']['vocab_size']
 energy_vocab = config['model']['energy_vocab']
@@ -46,6 +46,8 @@ if device.type == "cpu":
     print("Running on CPU.")
 else:
     print(f"Running on {torch.cuda.device_count()} GPU(s).")
+
+use_kv_cache = True
 
 model = ECAL_GPT(vocab_size,
                msl,
@@ -79,14 +81,15 @@ model.eval()
 
 # (Optional) compile AFTER loading. If you stay on CPU, compiling may not help; feel free to skip.
 try:
-    model = torch.compile(model, mode="reduce-overhead", dynamic=True)
+    if use_kv_cache == True:
+        model = torch.compile(model, mode="reduce-overhead", dynamic=True)
 except Exception as _:
     # torch.compile may not be available / useful on this env; continue without it
     print('Could not compile model. Continuing...')
     pass
 
 energies = []
-val_data = "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/val"
+val_data = "/mnt/c/Users/cjgranger/Documents/FM4CAL/val"
 for file_path in os.listdir(val_data):
     with h5py.File(os.path.join(val_data, file_path), "r") as f:
         keys = f.keys()
@@ -156,10 +159,9 @@ def energy_key(val: float, ndigits: int = 6) -> str:
     return f"{float(val):.{ndigits}f}"
 
 
-# --- replace your save_generated(...) with this batched version ---
 @torch.inference_mode()
 def save_generated(outfile, model, sampling_methods, energies,
-                   batch_size=64, max_seq_len=1700, flush_size=1024):
+                   batch_size=1, max_seq_len=1700, flush_size=1024):
     print(f"Writing generated samples to: {outfile}")
 
     # choose compact dtypes safely
@@ -187,7 +189,7 @@ def save_generated(outfile, model, sampling_methods, energies,
 
             # generate one shot per initial_energy
             idx_batch, e_batch = model.generate(
-                initial_energy=batch, method=method, max_seq_len=max_seq_len
+                initial_energy=batch, method=method, max_seq_len=max_seq_len, use_kv_cache=False
             )
 
             # move to CPU
@@ -221,12 +223,10 @@ def save_generated(outfile, model, sampling_methods, energies,
         w.close()
 
 
-
-
 # ------- NEW: build date- and model-based filename -------
 run_date = datetime.now().strftime("%b-%d-%Y")  # e.g., 'Sep-02-2025'
 model_name = Path(model_path).stem              # e.g., 'ecal_test_epoch99_val_loss_8.982370'
-base_dir = Path("/sciclone/data10/cjgranger/ECALGPT_generated")
+base_dir = Path("/mnt/c/Users/cjgranger/Documents/FM4CAL/ECALGPT_generated")
 
 outfile = base_dir / run_date / f"{model_name}.hdf5"
 # --------------------------------------------------------

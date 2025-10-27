@@ -7,6 +7,12 @@ from models.MoE import MoE
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.nn.functional import scaled_dot_product_attention as sdpa
+import math
+
+torch.backends.cuda.enable_flash_sdp(True)         # use FlashAttention when possible
+torch.backends.cuda.enable_mem_efficient_sdp(True) # fallback fused kernel
+torch.backends.cuda.enable_math_sdp(False)         # prefer the fast paths
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
@@ -542,8 +548,8 @@ class ECAL_GPT(nn.Module):
                             padding_mask=None, past_kvs=None):
         """
         Args:
-            x_t: [B,1,E]  newest *space* token embedding (token + pos)
-            e_t: [B,1,E]  newest *time*  token embedding (energy + pos)
+            x_t: [B,2,E]  newest *space* token embedding (token + pos)
+            e_t: [B,2,E]  newest *time*  token embedding (energy + pos)
             past_kvs: list matching self.layers. Each entry is either:
                     - for CA layer: Tuple(K,V) over x-stream
                     - for MHSA layers: Tuple(K,V)
@@ -626,13 +632,13 @@ class ECAL_GPT(nn.Module):
     @torch.inference_mode()
     def generate(self, initial_energy, class_label=None, max_seq_len=250,
                 context_len=None, temperature: float = 1.0, method="Default",
-                topK=100, nucleus_p=0.98, dynamic_temp=False):
+                topK=100, nucleus_p=0.98, dynamic_temp=False, use_kv_cache=False):
 
         device = self.device
         B = initial_energy.shape[0]
 
         # state we keep for sampling logic only
-        idx = torch.zeros(B, 1, device=device, dtype=torch.long)
+        idx = torch.full((B, 1), self.SOS_token, device=device, dtype=torch.long)
         e = torch.zeros(B, 1, device=device, dtype=torch.long) if self.digitize_energy else torch.zeros(B, 1, device=device).float()
 
         # initial-energy token embedding (t = 0)
@@ -653,72 +659,93 @@ class ECAL_GPT(nn.Module):
         dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         ):
             for step in range(max_seq_len):
-                # build current-step embeddings
-                if step == 0:
-                    # for t=0, we query with initial-energy on both streams
-                    x_t = init_e_embed  # space stream includes the init energy first (per your design)
-                    e_t = init_e_embed
+
+                if use_kv_cache:
+                    # build current-step embeddings
+                    if step == 0:
+                        pos_idx = torch.zeros((B, 1), device=device, dtype=torch.long)  # pos=0 for SOS
+                        x_t = self.token_embedding(idx) + self.pos_embedding(pos_idx)   # [B,1,E]
+                        x_t = torch.cat((init_e_embed, x_t), dim=1)                     # [B,2,E]  (initE, SOS)
+
+                        if self.digitize_energy:
+                            e_t = self.energy_embedding(e) + self.energy_pos_embedding(pos_idx)  # e is SOS
+                            e_t = torch.cat((init_e_embed, e_t), dim=1)  # [B,2,E]
+                        else:
+                            # continuous energy has no SOS; just the conditional token at t=0
+                            e_t = init_e_embed
+                    else:
+                        # position index for new token
+                        pos_idx = torch.full((B, 1), t, device=device, dtype=torch.long)
+                        # token stream
+                        x_t = self.token_embedding(idx[:, -1:]) + self.pos_embedding(pos_idx)
+                        # time/energy stream
+                        if self.digitize_energy:
+                            e_t = self.energy_embedding(e[:, -1:]) + self.energy_pos_embedding(pos_idx)
+                        else:
+                            e_t = self.energy_embedding(e[:, -1:].reshape(-1,1)).view(B, 1,-1) + self.energy_pos_embedding(pos_idx)
+
+                    # one decode step through the stack w/ caches
+                    h_t, past_kvs = self.forward_decode_step(x_t, e_t, class_label=class_label, padding_mask=None, past_kvs=past_kvs)
+
+                    # project to logits
+                    if not self.classification and not self.sequence_level:
+                        pixel_logits = self.logits_head(h_t)[:, -1, :] / temperature
+                        if self.digitize_energy:
+                            time_logits = self.energy_head(h_t)[:, -1, :] / temperature
+                        else:
+                            time_val = self.energy_head(h_t)[:, -1]  # regression
+
                 else:
-                    # position index for new token
-                    pos_idx = torch.full((B, 1), t, device=device, dtype=torch.long)
-                    # token stream
-                    x_t = self.token_embedding(idx[:, -1:]) + self.pos_embedding(pos_idx)
-                    # time/energy stream
+                    # -------- NO-CACHE path: recompute full prefix each step --------
+                    # Call the usual forward() with the *entire* prefix (idx, e).
+                    # forward() will prepend initial-energy internally and apply masks.
+                    pixel_all, e_out_all = self.forward(idx, e, initial_energy, class_label=class_label, padding_mask=None)
+
+                    # take last position logits/values
+                    pixel_logits = pixel_all[:, -1, :] / temperature
                     if self.digitize_energy:
-                        e_t = self.energy_embedding(e[:, -1:]) + self.energy_pos_embedding(pos_idx)
+                        time_logits = e_out_all[:, -1, :] / temperature
                     else:
-                        e_t = self.energy_embedding(e[:, -1:].reshape(-1,1)).view(B, 1,-1) + self.energy_pos_embedding(pos_idx)
+                        time_val = e_out_all[:, -1]
 
-                # one decode step through the stack w/ caches
-                h_t, past_kvs = self.forward_decode_step(x_t, e_t, class_label=class_label, padding_mask=None, past_kvs=past_kvs)
+                # sample pixel token
+                if method == "Default":
+                    probs = F.softmax(pixel_logits, dim=-1)
+                    idx_next = torch.multinomial(probs, num_samples=1)
+                elif method == "TopK":
+                    idx_next = self.__topK(pixel_logits, topK)
+                elif method == "Nucleus":
+                    idx_next = self.__nucleus(pixel_logits, nucleus_p)
+                elif method == "Greedy":
+                    idx_next = torch.argmax(pixel_logits, dim=-1, keepdim=True)
+                elif method == "Min_p":
+                    idx_next = self.__min_p(pixel_logits)
 
-                # project to logits
-                if not self.classification and not self.sequence_level:
-                    pixel_logits = self.logits_head(h_t)[:, -1, :] / temperature
-                    if self.digitize_energy:
-                        time_logits = self.energy_head(h_t)[:, -1, :] / temperature
-                    else:
-                        time_val = self.energy_head(h_t)[:, -1]  # regression
-
-                    # sample pixel token
-                    if method == "Default":
-                        probs = F.softmax(pixel_logits, dim=-1)
-                        idx_next = torch.multinomial(probs, num_samples=1)
-                    elif method == "TopK":
-                        idx_next = self.__topK(pixel_logits, topK)
-                    elif method == "Nucleus":
-                        idx_next = self.__nucleus(pixel_logits, nucleus_p)
-                    elif method == "Greedy":
-                        idx_next = torch.argmax(pixel_logits, dim=-1, keepdim=True)
-                    elif method == "Min_p":
-                        idx_next = self.__min_p(pixel_logits)
-
-                    # sample time token/value
-                    if self.digitize_energy:
-                        probs_t = F.softmax(time_logits, dim=-1, dtype=torch.float32)
-                        e_next = torch.multinomial(probs_t, num_samples=1) if method=="Default" else \
-                                (self.__topK(time_logits, topK) if method=="TopK" else
-                                self.__nucleus(time_logits, nucleus_p) if method=="Nucleus" else
-                                torch.argmax(time_logits, dim=-1, keepdim=True) if method=="Greedy" else
-                                self.__min_p(time_logits))
-                    else:
-                        e_next = time_val.unsqueeze(1)
-
-                    # EOS handling
-                    is_done |= (e_next.squeeze(1) == self.EOS_energy_token) | (idx_next.squeeze(1) == self.EOS_token)
-                    idx_next[is_done] = self.EOS_token
-                    if self.digitize_energy:
-                        e_next[is_done] = self.EOS_energy_token
-
-                    # append to sequences (for next-step embedding only)
-                    idx = torch.cat([idx, idx_next], dim=1)
-                    e = torch.cat([e, e_next], dim=1)
-
-                    t += 1
-                    if torch.all(is_done):
-                        break
+                # sample time token/value
+                if self.digitize_energy:
+                    probs_t = F.softmax(time_logits, dim=-1, dtype=torch.float32)
+                    e_next = torch.multinomial(probs_t, num_samples=1) if method=="Default" else \
+                            (self.__topK(time_logits, topK) if method=="TopK" else
+                            self.__nucleus(time_logits, nucleus_p) if method=="Nucleus" else
+                            torch.argmax(time_logits, dim=-1, keepdim=True) if method=="Greedy" else
+                            self.__min_p(time_logits))
                 else:
-                    raise NotImplementedError("KV-cached generation shown for the autoregressive (non-classification, non-sequence-level) path.")
+                    e_next = time_val.unsqueeze(1)
+
+                # EOS handling
+                is_done |= (e_next.squeeze(1) == self.EOS_energy_token) | (idx_next.squeeze(1) == self.EOS_token)
+                idx_next[is_done] = self.EOS_token
+                if self.digitize_energy:
+                    e_next[is_done] = self.EOS_energy_token
+
+                # append to sequences (for next-step embedding only)
+                idx = torch.cat([idx, idx_next], dim=1)
+                e = torch.cat([e, e_next], dim=1)
+
+                t += 1
+                if torch.all(is_done):
+                    break
+
         return idx, e
 
     @torch.no_grad()
