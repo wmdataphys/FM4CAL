@@ -497,7 +497,7 @@ class ECAL_GPT(nn.Module):
         x = torch.cat((initial_energy_embed, x), dim=1)
 
         # Instead of adding time and position embeddings, combine through Cross attention
-        # Query from time space, given space (key,value)
+        # Query from time space, given space (key, value)
         if padding_mask is not None:
             energy_mask = torch.zeros(batch_size, initial_energy.shape[-1], dtype=torch.bool, device=x.device)  # No masking for kinematic tokens
             padding_mask = torch.cat((energy_mask, padding_mask), dim=1)
@@ -638,8 +638,8 @@ class ECAL_GPT(nn.Module):
         B = initial_energy.shape[0]
 
         # state we keep for sampling logic only
-        idx = torch.full((B, 1), self.SOS_token, device=device, dtype=torch.long)
-        e = torch.zeros(B, 1, device=device, dtype=torch.long) if self.digitize_energy else torch.zeros(B, 1, device=device).float()
+        idx = torch.zeros(B, 2, device=device, dtype=torch.long)
+        e = torch.zeros(B, 2, device=device, dtype=torch.long) if self.digitize_energy else torch.zeros(B, 2, device=device).float()
 
         # initial-energy token embedding (t = 0)
         if initial_energy.dim() == 1:
