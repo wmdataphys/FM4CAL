@@ -4,7 +4,7 @@ import random
 # or something like that
 
 # Load file paths from all_files.txt
-with open("all_files.txt", "r") as f:
+with open("all_files_small.txt", "r") as f:
     files = [line.strip() for line in f]
 
 # Shuffle the list
@@ -18,12 +18,12 @@ train_files = files[:split_idx]
 val_files = files[split_idx:]
 
 # Write train file list
-with open("train_files.txt", "w") as f:
+with open("train_files_small.txt", "w") as f:
     for line in train_files:
         f.write(line + "\n")
 
 # Write validation file list
-with open("val_files.txt", "w") as f:
+with open("val_files_small.txt", "w") as f:
     for line in val_files:
         f.write(line + "\n")
 

@@ -5,6 +5,18 @@ __pycache__/
 # Ignore log files
 *.log
 *.txt
+*.out
+*.prof
+
+# Ignore data and k8 files
+*.yaml
+*.yml
+*.pkl
+*.sbatch
+*.slurm
+*.h5
+*.csv
+
 
 # Ignore system files
 .DS_Store
@@ -21,6 +33,15 @@ dist/
 
 # Ignore data folders
 data/
+
+# ignore config
+config/
+
+# Ignore plotting for now
+plotting/
+
+# Ignore model weights
+Trained_Models/
 
 # Ignore notebook folders
 notebooks/

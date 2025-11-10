@@ -20,9 +20,9 @@ import warnings
 from datetime import datetime
 import sys, traceback, faulthandler
 faulthandler.enable(all_threads=True)          # native crashes, deadlocks
-os.environ.setdefault("PYTHONFAULTHANDLER","1")
-os.environ.setdefault("CUDA_LAUNCH_BLOCKING","1")  # sync CUDA to get real stack traces
-os.environ.setdefault("PYTHONUNBUFFERED","1")      # flush prints immediately
+os.environ.setdefault("PYTHONFAULTHANDLER", "1")
+os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")  # sync CUDA to get real stack traces
+os.environ.setdefault("PYTHONUNBUFFERED", "1")      # flush prints immediately
 
 from dataloader.dataset import ECAL_Dataset
 from dataloader.tokenizer import EnergyTokenizer
@@ -53,6 +53,10 @@ def main(config, resume, distributed, use_amp=True):
     curr_date = datetime.now()
     exp_name = config['name'] + '___' + curr_date.strftime('%b-%d-%Y___%H:%M:%S')
     exp_name = exp_name[:-11]
+
+    output_folder = config['output']['dir']
+    run_dir = os.path.join(output_folder, exp_name)
+    os.makedirs(run_dir, exist_ok=True)
     print(exp_name)
 
     # Create directory structure
@@ -170,7 +174,6 @@ def main(config, resume, distributed, use_amp=True):
 
     lr = float(config['optimizer']['lr'])
 
-    # No need for warmup
     optimizer = torch.optim.RAdam(list(filter(lambda p: p.requires_grad, net.parameters())), lr=lr)
 
     # AMP usage
@@ -201,7 +204,7 @@ def main(config, resume, distributed, use_amp=True):
     print('      num_epochs:', num_epochs)
     print('')
 
-    loss_fn = nn.CrossEntropyLoss(ignore_index=pad_token)
+    loss_fn = nn.CrossEntropyLoss(ignore_index=pad_token,)
     if digitize_energy:
         print("Energy vocab: ", energy_pad_token + 1)
         energy_ce = nn.CrossEntropyLoss(ignore_index=energy_pad_token)
@@ -384,6 +387,8 @@ def main(config, resume, distributed, use_amp=True):
             name_output_file = config['name'] + '_epoch{:02d}_train_loss_{:.6f}.pth'.format(epoch, running_loss / len(train_loader.dataset))
 
         filename = os.path.join(output_folder, exp_name, name_output_file)
+        save_dir = os.path.dirname(filename)
+        os.makedirs(save_dir, exist_ok=True)
 
         checkpoint = {}
         checkpoint['net_state_dict'] = (

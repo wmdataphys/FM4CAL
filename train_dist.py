@@ -101,7 +101,7 @@ class Trainer:
             print("=====================================")
 
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.pad_token)
-        self.energy_ce = nn.CrossEntropyLoss(ignore_index=self.energy_pad_token) if self.digitize_energy else None
+        self.energy_ce = nn.CrossEntropyLoss(ignore_index=self.energy_pad_token, label_smoothing=0.1) if self.digitize_energy else None
         self.energy_loss_fn = None  # you’ll need to define this or import it
 
         self.optimizer = torch.optim.RAdam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=float(config['optimizer']['lr']))
@@ -136,13 +136,24 @@ class Trainer:
         sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True)
         loader = CreateDistLoader(dataset, sampler=sampler, batch_size=self.config['dataloader']['train']['batch_size'],
                                 num_workers=self.config['dataloader']['train']['num_workers'],
-                                pin_memory=False,persistent_workers=False)
+                                pin_memory=False, persistent_workers=False)
         return loader, sampler
 
     def train_epoch(self, train_loader, sampler):
         sampler.set_epoch(self.epoch)
         self.model.train()
         running_loss = 0.0
+
+        if self.rank == 0:
+            print("[rank0] probing first batch...")
+            sys.stdout.flush()
+        import time
+        t0 = time.time()
+        _probe = next(iter(train_loader))     # will raise immediately if something's wrong
+        if self.rank == 0:
+            print(f"[rank0] first batch fetched in {time.time()-t0:.2f}s")
+            sys.stdout.flush()
+        dist.barrier()
 
         for i, data in enumerate(train_loader):
             tokens = data[0].to(self.device).long()

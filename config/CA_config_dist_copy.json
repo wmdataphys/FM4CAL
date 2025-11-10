@@ -8,12 +8,12 @@
   },
   "dataset": {
     "tracks_per_file": 10000,
-    "base_dir":"/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/simulation_10mill",
+    "base_dir":"/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/small_model_files",
     "training": {
-      "data_path": "/sciclone/home/cjgranger/FM4CAL/train_files.txt"
+      "data_path": "/sciclone/home/cjgranger/FM4CAL/train_files_small.txt"
     },
     "validation": {
-      "data_path": "/sciclone/home/cjgranger/FM4CAL/val_files.txt"
+      "data_path": "/sciclone/home/cjgranger/FM4CAL/val_files_small.txt"
     },
     "in_memory": "in_memory"
   },

@@ -44,7 +44,7 @@
     "energy_res": 0.0035
   },
   "optimizer": {
-    "lr": 0.0001,
+    "lr": 0.001,
     "lr_cls": 0.001,
     "weight_decay": 0.01,
     "alpha": 0.001
@@ -65,5 +65,14 @@
         "shuffle": false,
         "num_workers": 4
     }
+  },
+  "train_ctrl": {
+    "lambda_idx_start": 3.0,
+    "lambda_idx_end": 1.0,
+    "lambda_en": 1.0,
+    "curriculum_warm_epochs": 1,
+    "idx_logit_temp": 1.0,
+    "en_logit_temp": 1.5,
+    "energy_label_smoothing": 0.05
   }
 }
