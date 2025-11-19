@@ -115,7 +115,8 @@ class CrossAttention(nn.Module):
         """
         batch_size, seq_len, embed_dim = x.shape
 
-        q, k, v = self.q_proj(e_embed), self.k_proj(x), self.v_proj(x)
+        # Updated to swap Q and KV from position to energy
+        q, k, v = self.q_proj(x), self.k_proj(e_embed), self.v_proj(e_embed)
 
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
@@ -377,8 +378,8 @@ class TransformerBlock(nn.Module):
 
 class ECAL_GPT(nn.Module):
     def __init__(self,
-                 vocab_size,
-                 seq_len,
+                vocab_size,
+                seq_len,
                 embed_dim,
                 attn_heads=[2, 4, 2],
                 num_blocks=2,
@@ -392,7 +393,8 @@ class ECAL_GPT(nn.Module):
                 classification=False,
                 sequence_level=False,
                 use_MoE=False, num_experts: int = 4, num_classes: int = 2,
-                device='cuda'):
+                device='cuda',
+                grid_shape=None):
         super().__init__()
 
         self.use_MoE = use_MoE
@@ -414,6 +416,44 @@ class ECAL_GPT(nn.Module):
         self.energy_pos_embedding = nn.Embedding(seq_len, embed_dim)
         self.initial_energy_embedding = nn.Linear(1, embed_dim)
         self.device = device
+
+        # Add in 3D positional embeddings if provided
+        self.grid_shape = grid_shape
+        if grid_shape is not None:
+            Nz, Ny, Nx = grid_shape
+            self.Nz, self.Ny, self.Nx = Nz, Ny, Nx
+            num_cells = Nz * Ny * Nx
+
+            self.x_embedding = nn.Embedding(Nx, embed_dim)
+            self.y_embedding = nn.Embedding(Ny, embed_dim)
+            self.z_embedding = nn.Embedding(Nz, embed_dim)
+
+            # Precompute mapping tokens -> (z,y,x)
+            # token ids occupy [1, num_cells], 0 is SOS, num_cells+1 is EOS, num_cells+2 is PAD
+            flat = torch.arange(num_cells, dtype=torch.long)
+            z = flat // (Ny * Nx)
+            rem = flat % (Ny * Nx)
+            y = rem // Nx
+            x = rem % Nx
+
+            # Allocate full vocab sized maps, default 0 for special tokens
+            tok2z = torch.zeros(space_vocab, dtype=torch.long)
+            tok2y = torch.zeros(space_vocab, dtype=torch.long)
+            tok2x = torch.zeros(space_vocab, dtype=torch.long)
+
+            # Shift by one to leave room for 0 for SOS
+            tok2x[1:1 + num_cells] = x
+            tok2y[1:1 + num_cells] = y
+            tok2z[1:1 + num_cells] = z
+
+            self.register_buffer('tok2x', tok2x)
+            self.register_buffer('tok2y', tok2y)
+            self.register_buffer('tok2z', tok2z)
+        else:
+            self.x_embedding = None
+            self.y_embedding = None
+            self.z_embedding = None
+
         # Can refactor this - fine for now
         layers_ = [CATransformerBlock(embed_dim,
                                       attn_heads[0],
@@ -467,6 +507,30 @@ class ECAL_GPT(nn.Module):
         self.EOS_energy_token = energy_vocab - 2  # 27001
         self.energy_pad_token = energy_vocab - 1  # 27002
 
+    def embed_space_tokens(self, idx, pos_idx):
+        """
+        idx : [B, T] space token ids
+        pos_idx : [B, T] position ids
+        returns: [B, T, E] embedded tokens with positional and (if applicable) 3D embeddings added
+        """
+        tok_emb = self.token_embedding(idx)
+        pos_emb = self.pos_embedding(pos_idx)
+
+        if self.x_embedding is None:
+            # No 3D embeddings
+            return tok_emb + pos_emb
+        
+        # Map tokens -> z,y,x indices via precomputed lookup
+        x_coord = self.tok2x[idx]
+        y_coord = self.tok2y[idx]
+        z_coord = self.tok2z[idx]
+
+        x_emb = self.x_embedding(x_coord)
+        y_emb = self.y_embedding(y_coord)
+        z_emb = self.z_embedding(z_coord)
+
+        return tok_emb + pos_emb + x_emb + y_emb + z_emb
+
     def forward(self, x, e, initial_energy, class_label=None, padding_mask=None):
         seq_len = x.shape[1]
         batch_size = x.shape[0]
@@ -492,7 +556,7 @@ class ECAL_GPT(nn.Module):
         initial_energy_embed = self.initial_energy_embedding(initial_energy)  # (B, E)
         initial_energy_embed = initial_energy_embed.unsqueeze(1)              # (B, 1, E)
 
-        x = self.token_embedding(x) + self.pos_embedding(pos)
+        x = self.embed_space_tokens(x, pos)  # Changed with positional and 3D embeddings
         e_embed = torch.cat((initial_energy_embed, e_embed), dim=1)  # Make sure to concat initial energy here
         x = torch.cat((initial_energy_embed, x), dim=1)
 
@@ -638,8 +702,8 @@ class ECAL_GPT(nn.Module):
         B = initial_energy.shape[0]
 
         # state we keep for sampling logic only
-        idx = torch.zeros(B, 2, device=device, dtype=torch.long)
-        e = torch.zeros(B, 2, device=device, dtype=torch.long) if self.digitize_energy else torch.zeros(B, 2, device=device).float()
+        idx = torch.zeros(B, 1, device=device, dtype=torch.long)
+        e = torch.zeros(B, 1, device=device, dtype=torch.long) if self.digitize_energy else torch.zeros(B, 2, device=device).float()
 
         # initial-energy token embedding (t = 0)
         if initial_energy.dim() == 1:
@@ -664,11 +728,11 @@ class ECAL_GPT(nn.Module):
                     # build current-step embeddings
                     if step == 0:
                         pos_idx = torch.zeros((B, 1), device=device, dtype=torch.long)  # pos=0 for SOS
-                        x_t = self.token_embedding(idx) + self.pos_embedding(pos_idx)   # [B,1,E]
-                        x_t = torch.cat((init_e_embed, x_t), dim=1)                     # [B,2,E]  (initE, SOS)
+                        x_t = self.embed_space_tokens(idx[:, -1:], pos_idx)   # [B,1,E]
+                        x_t = torch.cat((init_e_embed, x_t), dim=1)           # [B,2,E]  (initE, SOS)
 
                         if self.digitize_energy:
-                            e_t = self.energy_embedding(e) + self.energy_pos_embedding(pos_idx)  # e is SOS
+                            e_t = self.energy_embedding(e[:, -1:]) + self.energy_pos_embedding(pos_idx)  # e is SOS
                             e_t = torch.cat((init_e_embed, e_t), dim=1)  # [B,2,E]
                         else:
                             # continuous energy has no SOS; just the conditional token at t=0
@@ -677,12 +741,12 @@ class ECAL_GPT(nn.Module):
                         # position index for new token
                         pos_idx = torch.full((B, 1), t, device=device, dtype=torch.long)
                         # token stream
-                        x_t = self.token_embedding(idx[:, -1:]) + self.pos_embedding(pos_idx)
+                        x_t = self.embed_space_tokens(idx[:, -1:], pos_idx)
                         # time/energy stream
                         if self.digitize_energy:
                             e_t = self.energy_embedding(e[:, -1:]) + self.energy_pos_embedding(pos_idx)
                         else:
-                            e_t = self.energy_embedding(e[:, -1:].reshape(-1,1)).view(B, 1,-1) + self.energy_pos_embedding(pos_idx)
+                            e_t = self.energy_embedding(e[:, -1:].reshape(-1, 1)).view(B, 1, -1) + self.energy_pos_embedding(pos_idx)
 
                     # one decode step through the stack w/ caches
                     h_t, past_kvs = self.forward_decode_step(x_t, e_t, class_label=class_label, padding_mask=None, past_kvs=past_kvs)

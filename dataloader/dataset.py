@@ -17,13 +17,15 @@ class ECAL_Dataset(Dataset):
                  max_seq_length=27000,
                  energy_digitizer=None,
                  in_memory: Literal['in_memory', 'per_file', 'as_needed'] = 'as_needed',
-                 index_cache_path=None):
+                 index_cache_path=None,
+                 ordering: Literal['energy', 'spatial'] = 'energy'):
 
         self.index_cache_path = index_cache_path
         # Constant shape per shot
         self.shape = (30, 30, 30)
         self.max_seq_length = max_seq_length
         self.energy_digitizer = energy_digitizer
+        self.ordering = ordering
 
         self.file_paths = self._gather_file_paths(data_path)
         self.index_map = self._build_index()
@@ -47,6 +49,57 @@ class ECAL_Dataset(Dataset):
 
         return
 
+    def _encode_sample(self, indices, values):
+        """
+        Takes sparse (indices, values) and returns:
+          sorted_positions, sorted_energies
+        WITHOUT SOS/EOS. Ordering is controlled by self.ordering.
+        """
+        if self.ordering == 'energy':
+            # Current behavior: dense tokens, sort by energy descending,
+            # then cut at first token == 1
+            tokens = self.energy_digitizer.tokenize((indices, values))  # (27000,)
+
+            if tokens.size > self.max_seq_length:
+                topk_idx = np.argpartition(tokens, -self.max_seq_length)[-self.max_seq_length:]
+                sorted_positions = topk_idx[np.argsort(-tokens[topk_idx])]
+            else:
+                sorted_positions = np.argsort(-tokens)
+
+            sorted_energies = tokens[sorted_positions]
+
+            # Cut sequence at first token with energy bin == 1
+            cut_index = np.argmax(sorted_energies == 1)
+            if sorted_energies[cut_index] != 1:
+                cut_index = len(sorted_energies)
+
+            sorted_positions = sorted_positions[:cut_index]
+            sorted_energies = sorted_energies[:cut_index]
+
+        elif self.ordering == 'spatial':
+            # NEW: spatial ordering (z, y, x) → flat index,
+            # sorted ascending = per-layer, top-left → bottom-right
+            flat = np.ravel_multi_index(indices.T, self.shape)  # (N_nonzero,)
+            order = np.argsort(flat)
+            flat_sorted = flat[order]
+            vals_sorted = values[order]
+
+            # Digitize energies only for nonzero voxels
+            sorted_energies = np.digitize(vals_sorted, self.energy_digitizer.e_bins)
+
+            # Truncate by max_seq_length if desired
+            if flat_sorted.size > self.max_seq_length:
+                flat_sorted = flat_sorted[:self.max_seq_length]
+                sorted_energies = sorted_energies[:self.max_seq_length]
+
+            sorted_positions = flat_sorted
+
+        else:
+            raise ValueError(f"Unknown ordering: {self.ordering}")
+
+        return sorted_positions, sorted_energies
+
+
     def _load_all_into_memory(self):
         if self.energy_digitizer is None:
             raise ValueError("Energy digitizer must be provided for tokenization.")
@@ -69,22 +122,8 @@ class ECAL_Dataset(Dataset):
                     values = group["values"][()]
                     initial_energy = group.attrs["initial_energy"].item()
 
-                    # Tokenize and sort
-                    tokens = self.energy_digitizer.tokenize((indices, values))
-                    if self.max_seq_length < tokens.size:
-                        topk_idx = np.argpartition(tokens, -self.max_seq_length)[-self.max_seq_length:]
-                        sorted_positions = topk_idx[np.argsort(-tokens[topk_idx])]
-                    else:
-                        sorted_positions = np.argsort(-tokens)
-                    sorted_energies = tokens[sorted_positions]
-
-                    # Trim at first energy == 1
-                    cut_index = np.argmax(sorted_energies == 1)
-                    if sorted_energies[cut_index] != 1:
-                        cut_index = len(sorted_energies)
-
-                    sorted_positions = sorted_positions[:cut_index]
-                    sorted_energies = sorted_energies[:cut_index]
+                    # Tokenize + order (energy or spatial)
+                    sorted_positions, sorted_energies = self._encode_sample(indices, values)
 
                     # Add SOS/EOS
                     sorted_positions = np.insert(sorted_positions, 0, self.SOS_token)
@@ -156,23 +195,11 @@ class ECAL_Dataset(Dataset):
                 values = group["values"][()]        # (N,)
                 initial_energy = group.attrs["initial_energy"].item()
 
-        # Tokenization
+        # Tokenization + ordering
         if self.energy_digitizer is None:
             raise ValueError("Energy digitizer must be provided for tokenization.")
 
-        tokens = self.energy_digitizer.tokenize((indices, values))
-
-        # Sort by energy (descending)
-        sorted_positions = np.argsort(tokens)[::-1]
-        sorted_energies = tokens[sorted_positions]
-
-        # Cut sequence at first token with energy bin == 1
-        cut_index = np.argmax(sorted_energies == 1)
-        if sorted_energies[cut_index] != 1:
-            cut_index = len(sorted_energies)
-
-        sorted_positions = sorted_positions[:cut_index]
-        sorted_energies = sorted_energies[:cut_index]
+        sorted_positions, sorted_energies = self._encode_sample(indices, values)
 
         # Add SOS/EOS tokens
         sorted_positions = np.insert(sorted_positions, 0, self.SOS_token)
@@ -190,13 +217,17 @@ class ECAL_Dataset(Dataset):
 class ECAL_Chunked_Dataset(Dataset):
     def __init__(self, file_list,
                  max_seq_length=27000,
-                 energy_digitizer=None,verbose=False):
+                 energy_digitizer=None,verbose=False,
+                 ordering: Literal['energy', 'spatial'] = 'energy'
+                ):
 
         # Constant shape per shot
         self.shape = (30, 30, 30)
         self.max_seq_length = max_seq_length
         self.energy_digitizer = energy_digitizer
         self.verbose = verbose
+        self.ordering = ordering
+        
         self.SOS_token = 0
         # Positional Tokens 1-27000
         self.EOS_token = 27000 + 1  # 27001
@@ -208,6 +239,42 @@ class ECAL_Chunked_Dataset(Dataset):
 
         self.file_list = file_list
         self.memory_cache = self._load_all_into_memory()
+
+    def _encode_sample(self, indices, values):
+        if self.ordering == 'energy':
+            tokens = self.energy_digitizer.tokenize((indices, values))
+
+            if tokens.size > self.max_seq_length:
+                topk_idx = np.argpartition(tokens, -self.max_seq_length)[-self.max_seq_length:]
+                sorted_positions = topk_idx[np.argsort(-tokens[topk_idx])]
+            else:
+                sorted_positions = np.argsort(-tokens)
+
+            sorted_energies = tokens[sorted_positions]
+
+            cut_index = np.argmax(sorted_energies == 1)
+            if sorted_energies[cut_index] != 1:
+                cut_index = len(sorted_energies)
+
+            sorted_positions = sorted_positions[:cut_index]
+            sorted_energies = sorted_energies[:cut_index]
+
+        elif self.ordering == 'spatial':
+            flat = np.ravel_multi_index(indices.T, self.shape)
+            order = np.argsort(flat)
+            flat_sorted = flat[order]
+            vals_sorted = values[order]
+
+            sorted_energies = np.digitize(vals_sorted, self.energy_digitizer.e_bins)
+            if flat_sorted.size > self.max_seq_length:
+                flat_sorted = flat_sorted[:self.max_seq_length]
+                sorted_energies = sorted_energies[:self.max_seq_length]
+            sorted_positions = flat_sorted
+
+        else:
+            raise ValueError(f"Unknown ordering: {self.ordering}")
+
+        return sorted_positions, sorted_energies
 
     def _load_all_into_memory(self):
         if self.energy_digitizer is None:
@@ -226,22 +293,8 @@ class ECAL_Chunked_Dataset(Dataset):
                     values = group["values"][()]
                     initial_energy = group.attrs["initial_energy"].item()
 
-                    # Tokenize and sort
-                    tokens = self.energy_digitizer.tokenize((indices, values))
-                    if self.max_seq_length < tokens.size:
-                        topk_idx = np.argpartition(tokens, -self.max_seq_length)[-self.max_seq_length:]
-                        sorted_positions = topk_idx[np.argsort(-tokens[topk_idx])]
-                    else:
-                        sorted_positions = np.argsort(-tokens)
-                    sorted_energies = tokens[sorted_positions]
-
-                    # Trim at first energy == 1
-                    cut_index = np.argmax(sorted_energies == 1)
-                    if sorted_energies[cut_index] != 1:
-                        cut_index = len(sorted_energies)
-
-                    sorted_positions = sorted_positions[:cut_index]
-                    sorted_energies = sorted_energies[:cut_index]
+                                        # Tokenize + order
+                    sorted_positions, sorted_energies = self._encode_sample(indices, values)
 
                     # Add SOS/EOS
                     sorted_positions = np.insert(sorted_positions, 0, self.SOS_token)
@@ -267,7 +320,9 @@ class ECAL_IterableDDP(IterableDataset):
                  batch_size=256,
                  shuffle_buffer=16384,   # tune: 8192–32768
                  seed=1234,
-                 verbose=False):
+                 verbose=False,
+                 ordering: Literal['energy', 'spatial'] = 'energy'
+                ):
         self.files = sorted(files if isinstance(files, (list, tuple)) else [files])
         self.energy_digitizer = energy_digitizer
         self.max_seq_length = max_seq_length
@@ -275,6 +330,7 @@ class ECAL_IterableDDP(IterableDataset):
         self.shuffle_buffer = shuffle_buffer
         self.seed = seed
         self.verbose = verbose
+        self.ordering = ordering
 
         # Tokens
         self.SOS_token = 0
@@ -290,27 +346,51 @@ class ECAL_IterableDDP(IterableDataset):
         return 0, 1
 
     def _tokenize_sort_trim(self, indices, values):
-        tokens = self.energy_digitizer.tokenize((indices, values))
+        if self.ordering == 'energy':
+            tokens = self.energy_digitizer.tokenize((indices, values))
 
-        if tokens.size > self.max_seq_length:
-            topk = np.argpartition(tokens, -self.max_seq_length)[-self.max_seq_length:]
-            order = topk[np.argsort(-tokens[topk])]
+            if tokens.size > self.max_seq_length:
+                topk = np.argpartition(tokens, -self.max_seq_length)[-self.max_seq_length:]
+                order = topk[np.argsort(-tokens[topk])]
+            else:
+                order = np.argsort(-tokens)
+
+            tok_sorted = tokens[order]
+            cut = np.argmax(tok_sorted == 1)
+            if tok_sorted[cut] != 1:
+                cut = len(tok_sorted)
+            order = order[:cut]
+            tok_sorted = tok_sorted[:cut]
+
+            pos = np.insert(order, 0, self.SOS_token)
+            pos = np.append(pos, self.EOS_token)
+
+            ene = np.insert(tok_sorted, 0, self.SOS_token)
+            ene = np.append(ene, self.energy_EOS_token)
+            return pos, ene
+
+        elif self.ordering == 'spatial':
+            # Spatial: only use nonzero voxels, sorted by flat index
+            shape = (30, 30, 30)
+            flat = np.ravel_multi_index(indices.T, shape)
+            order = np.argsort(flat)
+            flat_sorted = flat[order]
+            vals_sorted = values[order]
+
+            tok_sorted = np.digitize(vals_sorted, self.energy_digitizer.e_bins)
+            if flat_sorted.size > self.max_seq_length:
+                flat_sorted = flat_sorted[:self.max_seq_length]
+                tok_sorted = tok_sorted[:self.max_seq_length]
+
+            pos = np.insert(flat_sorted, 0, self.SOS_token)
+            pos = np.append(pos, self.EOS_token)
+
+            ene = np.insert(tok_sorted, 0, self.SOS_token)
+            ene = np.append(ene, self.energy_EOS_token)
+            return pos, ene
+
         else:
-            order = np.argsort(-tokens)
-
-        tok_sorted = tokens[order]
-        cut = np.argmax(tok_sorted == 1)
-        if tok_sorted[cut] != 1:
-            cut = len(tok_sorted)
-        order = order[:cut]
-        tok_sorted = tok_sorted[:cut]
-
-        pos = np.insert(order, 0, self.SOS_token)
-        pos = np.append(pos, self.EOS_token)
-
-        ene = np.insert(tok_sorted, 0, self.SOS_token)
-        ene = np.append(ene, self.energy_EOS_token)
-        return pos, ene
+            raise ValueError(f"Unknown ordering: {self.ordering}")
 
     def _pad_batch(self, batch):
         # dynamic pad to max sequence length in batch (cap at max_seq_length)

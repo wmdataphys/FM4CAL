@@ -132,7 +132,7 @@ class Trainer:
         self.kbar = pkbar.Kbar(target=total_batches, epoch=self.epoch, num_epochs=num_epochs, width=20)
             
     def load_chunked_dataset(self,file_list,verbose=False):
-        dataset = ECAL_Chunked_Dataset(file_list=file_list,max_seq_length=self.max_seq_length,energy_digitizer=self.energy_digitizer,verbose=verbose)
+        dataset = ECAL_Chunked_Dataset(file_list=file_list,max_seq_length=self.max_seq_length,energy_digitizer=self.energy_digitizer,verbose=verbose,ordering='spatial')
         sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True)
         loader = CreateDistLoader(dataset, sampler=sampler, batch_size=self.config['dataloader']['train']['batch_size'],
                                 num_workers=self.config['dataloader']['train']['num_workers'],

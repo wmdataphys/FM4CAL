@@ -78,6 +78,8 @@ def main(config, resume, distributed, use_amp=True):
     num_experts = config['model']['num_experts']
     num_classes = config['model']['num_classes']
     use_MoE = bool(config['model']['use_MoE'])
+    scale_initial_energy = config['model']['scale_initial_energy']
+    grid_shape = config['model'].get('grid_shape', None)
 
     # Time tokenization
     digitize_energy = bool(config['digitize_energy'])
@@ -111,17 +113,20 @@ def main(config, resume, distributed, use_amp=True):
         in_memory = config['dataset']['in_memory']
         index_cache_path = config['dataset']['training']['index_cache_path']
         val_index_cache_path = config['dataset']['validation']['index_cache_path']
+        ordering = config['dataset']['ordering']
 
         train_dataset = ECAL_Dataset(data_path=data_path,
                                     max_seq_length=msl,
                                     energy_digitizer=energy_digitizer,
                                     in_memory=in_memory,
-                                    index_cache_path=index_cache_path)
+                                    index_cache_path=index_cache_path,
+                                    ordering=ordering)
         val_dataset = ECAL_Dataset(data_path=val_data_path,
                                   max_seq_length=msl,
                                   energy_digitizer=energy_digitizer,
                                   in_memory=in_memory,
-                                  index_cache_path=val_index_cache_path)
+                                  index_cache_path=val_index_cache_path,
+                                  ordering=ordering)
         train_loader, val_loader = CreateECALLoaders(train_dataset, val_dataset, config)
 
     pad_token = train_dataset.pad_token
@@ -152,7 +157,8 @@ def main(config, resume, distributed, use_amp=True):
                 use_MoE=use_MoE,
                 num_experts=num_experts,
                 num_classes=num_classes,
-                device=device)
+                device=device,
+                grid_shape=grid_shape)
 
     if device.type == 'cuda':
         if not distributed:
@@ -252,7 +258,12 @@ def main(config, resume, distributed, use_amp=True):
                 next_energies = energies[:, 1:].clone()
                 energies = energies[:, :-1]
 
-                initial_energy = data[2].to(device).float()
+                if scale_initial_energy:
+                    initial_energy = ((data[2] - 10) / 45) - 1.0 # Scale to roughly -1 to 1
+                else:
+                    initial_energy = data[2]
+                
+                initial_energy = initial_energy.to(device).float()
 
                 padding_mask = (tokens == pad_token).to(device, dtype=torch.bool)
 
