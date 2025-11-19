@@ -93,6 +93,39 @@ def decompress_hdf5_to_dense(filename):
     return energy, layers
 
 
+def sparse_to_spatial_lists(indices, values, energy_tokenizer,
+                            shape=(30, 30, 30),
+                            drop_background=False,
+                            background_bin=1):
+    """
+    Convert sparse (indices, values) → two 1D arrays:
+      - positions: flat indices in top-left → bottom-right order per layer
+      - energy_tokens: digitized energies in the same order
+
+    indices: (N, 3) int, assumed (z, y, x)
+    values:  (N,)   float
+    """
+
+    # 1. Flatten positions into raster order index
+    flat = np.ravel_multi_index(indices.T, shape)   # (N,)
+
+    # 2. Sort by flat index → layer, row, col order
+    order = np.argsort(flat)
+    flat_sorted = flat[order]
+    vals_sorted = values[order]
+
+    # 3. Digitize energies using the tokenizer's bins
+    energy_tokens = np.digitize(vals_sorted, energy_tokenizer.e_bins)
+
+    # 4. Optional: drop background (e.g., token == 1)
+    if drop_background:
+        mask = (energy_tokens != background_bin)
+        flat_sorted = flat_sorted[mask]
+        energy_tokens = energy_tokens[mask]
+
+    return flat_sorted, energy_tokens
+
+
 def log_vram_usage(tag=""):
     torch.cuda.synchronize()
     allocated = torch.cuda.memory_allocated() / (1024 ** 2)

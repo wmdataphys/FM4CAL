@@ -13,10 +13,10 @@ from dataloader.tokenizer import EnergyTokenizer
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-with open("/mnt/c/Users/cjgranger/Documents/FM4CAL/Trained_Models/ecal_test___Jul-24-2025/config.json", "r") as f:
+with open("/sciclone/home/cjgranger/FM4CAL/Trained_Models/ecal_test___Nov-13-2025/config.json", "r") as f:
     config = json.load(f)
 
-model_path = '/mnt/c/Users/cjgranger/Documents/FM4CAL/Trained_Models/ecal_test___Jul-24-2025/ecal_test_epoch99_val_loss_8.982370.pth'
+model_path = '/sciclone/home/cjgranger/FM4CAL/Trained_Models/ecal_test___Nov-13-2025/ecal_test_epoch04_val_loss_8.254892.pth'
 
 vocab_size = config['model']['vocab_size']
 energy_vocab = config['model']['energy_vocab']
@@ -89,7 +89,7 @@ except Exception as _:
     pass
 
 energies = []
-val_data = "/mnt/c/Users/cjgranger/Documents/FM4CAL/val"
+val_data = "/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/val"
 for file_path in os.listdir(val_data):
     with h5py.File(os.path.join(val_data, file_path), "r") as f:
         keys = f.keys()
@@ -189,7 +189,7 @@ def save_generated(outfile, model, sampling_methods, energies,
 
             # generate one shot per initial_energy
             idx_batch, e_batch = model.generate(
-                initial_energy=batch, method=method, max_seq_len=max_seq_len, use_kv_cache=False
+                initial_energy=batch, method=method, max_seq_len=max_seq_len, use_kv_cache=True
             )
 
             # move to CPU
@@ -226,8 +226,8 @@ def save_generated(outfile, model, sampling_methods, energies,
 # ------- NEW: build date- and model-based filename -------
 run_date = datetime.now().strftime("%b-%d-%Y")  # e.g., 'Sep-02-2025'
 model_name = Path(model_path).stem              # e.g., 'ecal_test_epoch99_val_loss_8.982370'
-base_dir = Path("/mnt/c/Users/cjgranger/Documents/FM4CAL/ECALGPT_generated")
+base_dir = Path("/sciclone/home/cjgranger/FM4CAL/ECALGPT_generated")
 
 outfile = base_dir / run_date / f"{model_name}.hdf5"
 # --------------------------------------------------------
-save_generated(outfile, model, sampling_methods, energies)
+save_generated(outfile, model, sampling_methods, energies, batch_size=16)
