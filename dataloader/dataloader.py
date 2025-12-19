@@ -3,31 +3,61 @@ import numpy as np
 from torch.utils.data import DataLoader
 from functools import partial
 
+# pos, ene, initial_energy, material_index, pos_t, ene_t, initial_energy_t, material_index_t
+
+def ECAL_collate_inference(batch, max_seq_length=1700):
+    positions = []
+    energies = []
+    initial_energies = []
+    material_indices = []
+    initial_energy_t = []
+
+    for pos, ene, initial_energy, material_index, init_e_t in batch:
+        # Already padded
+        positions.append(torch.tensor(pos))
+        energies.append(torch.tensor(ene))
+        initial_energies.append(torch.tensor(initial_energy))
+        material_indices.append(torch.tensor(material_index))
+
+        initial_energy_t.append(torch.tensor(init_e_t)) # Unscaled eenergy
+
+
+    return torch.stack(positions), torch.stack(energies), torch.tensor(initial_energies), torch.stack(material_indices), \
+           torch.tensor(initial_energy_t)
+
+def CreateInferenceLoader(dataset,config):
+    loader = DataLoader(dataset,
+                            batch_size=config['Inference']['batch_size'],
+                            shuffle=False,
+                            collate_fn=ECAL_collate_inference,
+                            num_workers=config['Inference']['num_workers'],
+                            pin_memory=False)
+    return loader
 
 def ECAL_collate_fn(batch, max_seq_length=1700):
-    positions, energies, initial_energies = zip(*batch)
+    positions = []
+    energies = []
+    initial_energies = []
+    material_indices = []
 
-    max_len = min(max(len(p) for p in positions), max_seq_length)
+    for pos, ene, initial_energy, material_index in batch:
+        # Already padded
+        positions.append(torch.tensor(pos))
+        energies.append(torch.tensor(ene))
+        initial_energies.append(torch.tensor(initial_energy))
+        material_indices.append(torch.tensor(material_index))
 
-    padded_positions = []
-    padded_energies = []
+    return torch.stack(positions), torch.stack(energies), torch.tensor(initial_energies), torch.stack(material_indices)
 
-    for pos, en in zip(positions, energies):
-        pos = pos[:max_len]
-        en = en[:max_len]
-        pad_len = max_len - len(pos)
-        padded_positions.append(
-            torch.tensor(np.pad(pos, (0, pad_len), constant_values=27002))  # pad_token
-        )
-        padded_energies.append(
-            torch.tensor(np.pad(en, (0, pad_len), constant_values=en[-1] + 1))  # energy_pad_token
-        )
-
-    padded_positions = torch.stack(padded_positions)
-    padded_energies = torch.stack(padded_energies)
-    initial_energies = torch.tensor(initial_energies).float()
-
-    return padded_positions, padded_energies, initial_energies
+def CreateLoaderMoE(dataset,sampler,batch_size=256,num_workers=8,pin_memory=True,persistent_workers=False,prefetch_factor=2):
+    loader = DataLoader(dataset,sampler=sampler,
+                            batch_size=batch_size,
+                            collate_fn=ECAL_collate_fn,
+                            num_workers=num_workers,
+                            pin_memory=pin_memory,
+                            persistent_workers=persistent_workers,
+                            prefetch_factor=prefetch_factor)
+    return loader
 
 
 def CreateECALLoaders(train_dataset, val_dataset, config):

@@ -3,6 +3,17 @@ import h5py
 import torch
 import torch.nn as nn
 
+def read_text(file_path):
+    try:
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+        
+        lines = [line.strip() for line in lines]
+        return lines
+
+    except FileNotFoundError:
+        raise ValueError(f"Error: The file '{file_path}' was not found.")
+
 
 def energy_loss_fn(true_energies, pred_energies, padding_mask):
     """

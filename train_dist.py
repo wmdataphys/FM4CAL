@@ -15,14 +15,14 @@ import json
 import argparse
 import random
 import numpy as np
-import pkbar
+import pkbar    
 import math
 import warnings
 from datetime import datetime
 
 from dataloader.tokenizer import EnergyTokenizer
 from dataloader.dataset import ECAL_Chunked_Dataset
-from dataloader.dataloader import CreateDistLoader
+from dataloader.dataloader import CreateLoaderMoE
 
 from models.GPT import ECAL_GPT
 import torch.multiprocessing as mp
@@ -43,8 +43,8 @@ def create_model(config,state_dict=None):
     mlp_scale = config['model']['mlp_scale']
     msl = config['model']['max_seq_length']
     drop_rates = config['model']['drop_rates']
-    num_experts = config['model']['num_experts']
-    num_classes = config['model']['num_classes']
+    materials_list = config['material_list']
+    num_experts = len(materials_list)
     use_MoE = bool(config['model']['use_MoE'])
     digitize_energy = bool(config['digitize_energy'])
     
@@ -60,7 +60,7 @@ def create_model(config,state_dict=None):
                 drop_rates=drop_rates,
                 use_MoE=use_MoE,
                 num_experts=num_experts,
-                num_classes=num_classes)
+                material_list=materials_list)
                 
     if state_dict:
         net.load_state_dict(state_dict)
@@ -101,7 +101,7 @@ class Trainer:
             print("=====================================")
 
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.pad_token)
-        self.energy_ce = nn.CrossEntropyLoss(ignore_index=self.energy_pad_token, label_smoothing=0.1) if self.digitize_energy else None
+        self.energy_ce = nn.CrossEntropyLoss(ignore_index=self.energy_pad_token) if self.digitize_energy else None
         self.energy_loss_fn = None  # you’ll need to define this or import it
 
         self.optimizer = torch.optim.RAdam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=float(config['optimizer']['lr']))
@@ -112,15 +112,15 @@ class Trainer:
 
         # Energy tokenization
         if self.digitize_energy:
-            energy_res = config['stats']['energy_res']
-            e_max = config['stats']['energy_max']
-            e_min = config['stats']['energy_min'] 
-            self.energy_digitizer = EnergyTokenizer(e_max=e_max, e_min=e_min, resolution=energy_res)
+            token_energy_res = config['stats']['token_energy_res']
+            token_e_max = config['stats']['token_energy_max']
+            token_e_min = config['stats']['token_energy_min'] 
+            self.energy_digitizer = EnergyTokenizer(e_max=token_e_max, e_min=token_e_min, resolution=token_energy_res)
 
             if self.rank == 0:
                 print("Digitizing Energy - classification over adjacent vocabulary.")
                 print("Energy vocab: ", config['model']['energy_vocab'])
-                print("E_Max: ", e_max, " E_Min: ", e_min, "E_Res: ", energy_res)
+                print("Token_E_Max: ", token_e_max, " E_Min: ", token_e_min, "E_Res: ", token_energy_res)
         else:
             self.energy_digitizer = None
             if self.rank == 0:
@@ -128,15 +128,18 @@ class Trainer:
 
     def init_kbar(self,num_files,num_epochs=1):
         total_samples = num_files * self.config['dataset']['tracks_per_file'] 
-        total_batches = total_samples // self.config['dataloader']['train']['batch_size'] // self.world_size
+        total_batches = total_samples // self.config['dataloader']['train']['batch_size'] # // self.world_size
         self.kbar = pkbar.Kbar(target=total_batches, epoch=self.epoch, num_epochs=num_epochs, width=20)
             
     def load_chunked_dataset(self,file_list,verbose=False):
-        dataset = ECAL_Chunked_Dataset(file_list=file_list,max_seq_length=self.max_seq_length,energy_digitizer=self.energy_digitizer,verbose=verbose,ordering='spatial')
+        global_e_max = self.stats['global_energy_max']
+        global_e_min = self.stats['global_energy_min']
+        stats = {"Initial_Energy_Max": global_e_max, "Initial_Energy_Min": global_e_min}
+        dataset = ECAL_Chunked_Dataset(file_list=file_list,max_seq_length=self.max_seq_length,energy_digitizer=self.energy_digitizer,verbose=verbose,ordering='energy',global_stats=stats)
         sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True)
-        loader = CreateDistLoader(dataset, sampler=sampler, batch_size=self.config['dataloader']['train']['batch_size'],
+        loader = CreateLoaderMoE(dataset, sampler=sampler, batch_size=self.config['dataloader']['train']['batch_size_cls'] // self.world_size,
                                 num_workers=self.config['dataloader']['train']['num_workers'],
-                                pin_memory=False, persistent_workers=False)
+                                pin_memory=False,persistent_workers=False,prefetch_factor=self.config['dataloader']['train']['prefetch_factor'])
         return loader, sampler
 
     def train_epoch(self, train_loader, sampler):
@@ -144,22 +147,13 @@ class Trainer:
         self.model.train()
         running_loss = 0.0
 
-        if self.rank == 0:
-            print("[rank0] probing first batch...")
-            sys.stdout.flush()
-        import time
-        t0 = time.time()
-        _probe = next(iter(train_loader))     # will raise immediately if something's wrong
-        if self.rank == 0:
-            print(f"[rank0] first batch fetched in {time.time()-t0:.2f}s")
-            sys.stdout.flush()
-        dist.barrier()
 
         for i, data in enumerate(train_loader):
             tokens = data[0].to(self.device).long()
             energies = data[1].to(self.device).long() if self.digitize_energy else data[1].to(self.device).float()
             initial_energy = data[2].to(self.device).float()
-            class_label = data[-1].to(self.device).float() if self.use_MoE else None
+            material_index = data[-1].to(self.device).long() if self.use_MoE else None
+            skip_idx = 1 if self.use_MoE else 1
 
             next_tokens = tokens[:, 1:].clone()
             tokens = tokens[:, :-1]
@@ -173,10 +167,10 @@ class Trainer:
 
             if self.use_amp:
                 with autocast(dtype=torch.float16):
-                    logits, e, load_balance = self.model(tokens, energies, initial_energy, class_label=class_label, padding_mask=padding_mask)
+                    logits, e, load_balance = self.model(tokens, energies, initial_energy, material_index=material_index, padding_mask=padding_mask)
 
-                    logits = logits[:, 1:, :]
-                    e = e[:, 1:, :]
+                    logits = logits[:, skip_idx:, :]
+                    e = e[:, skip_idx:, :]
 
                     pixel_loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), next_tokens.reshape(-1))
 
@@ -199,11 +193,11 @@ class Trainer:
 
             else:
                 with torch.set_grad_enabled(True):
-                    logits, e, load_balance = self.model(tokens, energies, initial_energy, class_label=class_label, padding_mask=padding_mask)
+                    logits, e, load_balance = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask)
 
                 # Slice off the prepended initial energy token
-                logits = logits[:, initial_energy.shape[1]:, :]
-                e = e[:, initial_energy.shape[1]:, :]
+                logits = logits[:, skip_idx:, :]
+                e = e[:, skip_idx:, :]
 
                 pixel_loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), next_tokens.reshape(-1))
 
@@ -244,12 +238,14 @@ class Trainer:
             self.model.eval()
             val_pixel_loss = 0.0
             val_energy_loss = 0.0
+            skip_idx = 1 if self.use_MoE else 1
+            
             with torch.no_grad():
                 for i,data in enumerate(val_loader):
                     tokens = data[0].to(self.device).long()
                     energies = data[1].to(self.device).long() if self.digitize_energy else data[1].to(self.device).float()
                     initial_energy = data[2].to(self.device).float()
-                    class_label = data[-1].to(self.device).float() if self.use_MoE else None
+                    material_index = data[-1].to(self.device).long() if self.use_MoE else None
 
                     next_tokens = tokens[:, 1:].clone()
                     tokens = tokens[:, :-1]
@@ -259,9 +255,9 @@ class Trainer:
 
                     padding_mask = (tokens == self.pad_token).to(self.device)
 
-                    logits,e = self.model(tokens, energies, initial_energy, class_label=class_label, padding_mask=padding_mask)
-                    logits = logits[:, 1:, :]
-                    e = e[:, 1:, :]
+                    logits,e = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask)
+                    logits = logits[:, skip_idx:, :]
+                    e = e[:, skip_idx:, :]
 
                     if self.digitize_energy:
                         val_energy_loss += self.energy_ce(e.reshape(-1, e.size(-1)), next_energies.reshape(-1))
@@ -371,18 +367,18 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, state_d
     dist.destroy_process_group()
 
 
-def read_text(file_path,base_dir=None):
+def read_text(file_path):
     try:
         with open(file_path, 'r') as file:
             lines = file.readlines()
         
-        lines = [os.path.join(base_dir,line.strip()) for line in lines]
+        lines = [line.strip() for line in lines]
         return lines
 
     except FileNotFoundError:
         raise ValueError(f"Error: The file '{file_path}' was not found.")
 
-def main(config,resume):
+def main(config,resume,material_list=["G4_W","G4_Ta"],fine_tune=False):
     # Setup random seed
     torch.manual_seed(config['seed'])
     np.random.seed(config['seed'])
@@ -405,10 +401,27 @@ def main(config,resume):
     rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
 
-    base_dir = config['dataset']['base_dir']
+    train_files = []
+    val_files = []
 
-    train_files = read_text(config['dataset']['training']['data_path'],base_dir)
-    val_files = read_text(config['dataset']['validation']['data_path'],base_dir)
+    for material in material_list:
+        if "Pb" in material:
+            print("Adding Pb files to training and validation sets.")
+            train_files += read_text(config['dataset']['training']['Pb_train_files'])
+            val_files += read_text(config['dataset']['validation']['Pb_val_files'])
+        elif "W" in material:
+            print("Adding W files to training and validation sets.")
+            train_files += read_text(config['dataset']['training']['W_train_files'])
+            val_files += read_text(config['dataset']['validation']['W_val_files'])
+        elif "Ta" in material:
+            print("Adding Ta files to training and validation sets.")
+            train_files += read_text(config['dataset']['training']['Ta_train_files'])
+            val_files += read_text(config['dataset']['validation']['Ta_val_files'])
+    
+
+    random.shuffle(train_files)
+    random.shuffle(val_files)
+
     rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     
@@ -425,8 +438,10 @@ if __name__=='__main__':
                         help='Path to the config file (default: config.json)')
     parser.add_argument('-r', '--resume', default=None, type=str,
                         help='Path to the .pth model checkpoint to resume training')
+    parser.add_argument('-m', '--material_list', nargs='+', default=["G4_W","G4_Ta"],
+                        help='List of materials to include in training (default: ["G4_W","G4_Ta"])')
     args = parser.parse_args()
 
     config = json.load(open(args.config))
 
-    main(config,args.resume)
+    main(config,args.resume,args.material_list)

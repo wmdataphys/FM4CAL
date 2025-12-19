@@ -1,5 +1,5 @@
 # Ignore Python files
-__pycache__/
+*__pycache__
 *.pyc
 
 # Ignore log files
@@ -9,8 +9,6 @@ __pycache__/
 *.prof
 
 # Ignore data and k8 files
-*.yaml
-*.yml
 *.pkl
 *.sbatch
 *.slurm
@@ -39,7 +37,8 @@ config/
 
 # Ignore plotting for now
 plotting/
-
+Generations/
+outputs/
 # Ignore model weights
 Trained_Models/
 

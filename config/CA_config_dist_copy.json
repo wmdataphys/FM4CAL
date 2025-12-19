@@ -1,19 +1,29 @@
 {
-  "name": "ecal_dist",
+  "name": "Test_W_Ta_Model",
   "seed": 42,
   "digitize_energy": true,
   "use_amp": true,
+  "material_list": ["G4_W", "G4_Ta"],
   "output": {
-    "dir": "/sciclone/data10/cjgranger/ECAL_Models"
+    "dir": "/sciclone/data10/jgiroux/ECAL_Cole/ECAL_Models"
   },
   "dataset": {
     "tracks_per_file": 10000,
-    "base_dir":"/sciclone/data10/cjgranger/ECAL/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/small_model_files",
+    "base_dir":"/sciclone/data10/jgiroux/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/small_model_files",
     "training": {
-      "data_path": "/sciclone/home/cjgranger/FM4CAL/train_files_small.txt"
+      "Pb_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/Pb_Files_train.txt",
+      "W_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/W_Files_train.txt",
+      "Ta_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/Ta_Files_train.txt"
     },
     "validation": {
-      "data_path": "/sciclone/home/cjgranger/FM4CAL/val_files_small.txt"
+      "Pb_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/Pb_Files_val.txt",
+      "W_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/W_Files_val.txt",
+      "Ta_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/Ta_Files_val.txt"
+    },
+    "testing": {
+      "Pb_test_files": "data/Pb_Files_test.txt",
+      "W_test_files": "data/W_Files_test.txt",
+      "Ta_test_files": "data/Ta_Files_test.txt"
     },
     "in_memory": "in_memory"
   },
@@ -21,27 +31,27 @@
         "pad_token": 27002,
         "EOS_token": 27001,
         "SOS_token": 0,
-        "energy_EOS_token": 24939,
-        "energy_pad_token": 24940
+        "energy_EOS_token": 25001,
+        "energy_pad_token": 25002
     },
   "model": {
     "vocab_size": 27003,
-    "energy_vocab": 24941,
+    "energy_vocab": 25003,
     "embed_dim": 256,
     "attn_heads": [8,8,8],
     "num_blocks": 6,
     "hidden_units": 128,
-    "mlp_scale": 4,
-    "drop_rates": [0.1, 0.1, 0.1],
+    "mlp_scale": 2,
+    "drop_rates": [0.0, 0.0, 0.0],
     "max_seq_length": 1700,
-    "use_MoE": false,
-    "num_experts": 1,
-    "num_classes": 1
+    "use_MoE": 1
   },
   "stats": {
-    "energy_max": 87.27755,
-    "energy_min": 1.7589282e-18,
-    "energy_res": 0.0035
+    "global_energy_max": 100.0,
+    "global_energy_min": 10.0,
+    "token_energy_max": 25.0,
+    "token_energy_min": 1e-15,
+    "token_energy_res": 0.001
   },
   "optimizer": {
     "lr": 0.0001,
@@ -50,22 +60,41 @@
     "alpha": 0.001
   },
   "num_epochs": 100,
-  "num_epochs_MoE": 1,
-  "batch_size": 2,
-  "val_batch_size": 2,
-  "num_workers": 0,
+  "num_epochs_MoE": 100,
   "dataloader": {
-    "train": {
-      "batch_size": 16,
-      "shuffle": true,
-      "num_workers": 0,
-      "chunk_size": 10
-    },
-    "val": {
-        "batch_size": 16,
-        "shuffle": false,
-        "num_workers": 0,
-        "chunk_size": 10
-    }
+        "train": {
+            "num_workers": 2,
+            "prefetch_factor": 1,
+            "batch_size": 48,
+            "batch_size_MoE": 48,
+            "batch_size_cls": 48,
+            "batch_size_filtering": 48,
+            "chunk_size": 10
+        },
+        "val": {
+            "batch_size": 48,
+            "batch_size_MoE": 48,
+            "batch_size_cls": 48,
+            "batch_size_filtering": 48,
+            "num_workers": 0,
+            "chunk_size": 20
+        },
+        "test": {
+            "batch_size": 256,
+            "batch_size_cls": 512,
+            "batch_size_filtering": 512,
+            "num_workers": 0,
+            "batch_size_DLL": 25
+        }
+  },
+  "Inference": {
+    "model_path": "Trained_Models/25MeVTokens_256Embed_NoMatEmbedding_EnergyOrder___Dec-18-2025/Epoch02_loss_9.990749.pth",
+    "output_file": "Test_256Embed_Epoch2_Ta.h5",
+    "batch_size": 50,
+    "num_workers": 0,
+    "initial_energy_min": 10.0,
+    "initial_energy_max": 100.0,
+    "num_showers": 10000,
+    "flush_size": 1e5
   }
 }

@@ -15,6 +15,19 @@ from scipy.stats import wasserstein_distance
 
 vector.register_awkward()
 
+import gabbro.plotting.utils as plot_utils
+from gabbro.metrics.utils import quantiled_kl_divergence
+from gabbro.plotting.utils import plot_ratios
+from gabbro.utils.utils import (
+    KL,
+    find_max_energy_z,
+    get_COG_ak,
+    sum_energy_per_layer,
+    sum_energy_per_radial_distance,
+    write_distances_to_json,
+)
+
+
 
 def binclip(x, bins, dropinf=False):
     binfirst_center = bins[0] + (bins[1] - bins[0]) / 2

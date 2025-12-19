@@ -1,7 +1,8 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: ecal
+  name: ecal-tungsten-tantalum
+  namespace: ai4phys
 spec:
   restartPolicy: Never
   securityContext:
@@ -16,6 +17,8 @@ spec:
           mountPath: /sciclone/home/jgiroux # Your username
         - name: d10
           mountPath: /sciclone/data10/jgiroux/ # Your username
+        - name: scr30
+          mountPath: /sciclone/scr30/jgiroux # Your username
       command:
         - /bin/bash
         - -c
@@ -24,21 +27,21 @@ spec:
           export OMP_NUM_THREADS=2
           eval "$(conda shell.bash hook)"
           conda activate /sciclone/home/jgiroux/.conda/envs/torch_linux
-          torchrun --nproc-per-node=2 /sciclone/home/jgiroux/FM4CAL/train_dist.py --config /sciclone/home/jgiroux/FM4CAL/config/CA_config_dist.json > /sciclone/home/jgiroux/FM4CAL/ECAL_Test.txt 2>&1
+          torchrun --nproc-per-node=2 /sciclone/home/jgiroux/FM4CAL/train_dist.py --config /sciclone/home/jgiroux/FM4CAL/config/CA_config_dist_copy.json > /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/TestNewFiles.txt --material_list "G4_W" "G4_Ta"  2>&1
       resources:
         requests:
-          cpu: "20"
-          memory: "100Gi"
+          cpu: "30"
+          memory: "120Gi"
           nvidia.com/gpu: "2"
         limits:
-          cpu: "20"
-          memory: "100Gi"
+          cpu: "30"
+          memory: "120Gi"
           nvidia.com/gpu: "2"
       securityContext:
         runAsUser: 255610
         runAsGroup: 50027
   nodeSelector:
-    kubernetes.io/hostname: gu12.sciclone.wm.edu
+    kubernetes.io/hostname: gu08.sciclone.wm.edu
     nvidia.com/gpu.product: "NVIDIA-A40"
   volumes:
     - name: nsf
@@ -49,3 +52,11 @@ spec:
       nfs:
         server: 128.239.56.30
         path: /sciclone/data10/jgiroux # Your username
+    - name: scr30
+      nfs:
+        server: 128.239.56.174
+        path: /sciclone/scr30/jgiroux # Your username
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 2Gi
