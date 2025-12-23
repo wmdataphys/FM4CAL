@@ -62,184 +62,184 @@ def main(config,args):
             print("Generation aborted by user, running plotting code only.")
             make_plots(outfile, energy_digitizer, material_list=material_list, num_showers=args.num_showers)
             exit(0)
+
+    print("========= Generation Started =========")
+    print("Device: ", args.device)
+    print("Sampling Method: ", args.sampling_method)
+    print("Using AMP: ", args.use_amp)
+    print("Using KV Cache: ", args.use_kv_cache)
+    print("=====================================")
+
+    print("Digitizing Energy - classification over adjacent vocabulary.")
+    print("Energy vocab: ", config['model']['energy_vocab'])
+    print("E_Max: ", e_max, " E_Min: ", e_min, "E_Res: ", energy_res)
+
+
+    model = ECAL_GPT(vocab_size,
+                msl,
+                embed_dim,
+                attn_heads=attn_heads,
+                num_blocks=num_blocks,
+                hidden_units=hidden_units,
+                digitize_energy=digitize_energy,
+                mlp_scale=mlp_scale,
+                energy_vocab=energy_vocab,
+                drop_rates=drop_rates,
+                use_MoE=use_MoE,
+                num_experts=num_experts,
+                material_list=material_list).to(args.device)
+
+    model_path = config['Inference']['model_path']
+    checkpoint = torch.load(model_path, map_location=device)
+    model.load_state_dict(checkpoint["net_state_dict"])
+
+    scaler = None
+    if args.use_amp:
+        scaler = GradScaler()
+        if "scaler" in checkpoint:  # load scaler state if present
+            scaler.load_state_dict(checkpoint["scaler"])
+            print("Loaded AMP GradScaler state from checkpoint.")
         else:
-            print("========= Generation Started =========")
-            print("Device: ", args.device)
-            print("Sampling Method: ", args.sampling_method)
-            print("Using AMP: ", args.use_amp)
-            print("Using KV Cache: ", args.use_kv_cache)
-            print("=====================================")
+            print("No GradScaler state found in checkpoint; starting fresh.")
 
-            print("Digitizing Energy - classification over adjacent vocabulary.")
-            print("Energy vocab: ", config['model']['energy_vocab'])
-            print("E_Max: ", e_max, " E_Min: ", e_min, "E_Res: ", energy_res)
+    startEpoch = checkpoint.get("epoch", -1) + 1
+    history = checkpoint.get("history", {})
+    global_step = checkpoint.get("global_step", 0)
+    print(f"Loaded from: {model_path} at epoch {startEpoch}, global_step {global_step}")
 
+    model.eval()
 
-            model = ECAL_GPT(vocab_size,
-                        msl,
-                        embed_dim,
-                        attn_heads=attn_heads,
-                        num_blocks=num_blocks,
-                        hidden_units=hidden_units,
-                        digitize_energy=digitize_energy,
-                        mlp_scale=mlp_scale,
-                        energy_vocab=energy_vocab,
-                        drop_rates=drop_rates,
-                        use_MoE=use_MoE,
-                        num_experts=num_experts,
-                        material_list=material_list).to(args.device)
+    # (Optional) compile AFTER loading. If you stay on CPU, compiling may not help; feel free to skip.
+    try:
+        if use_kv_cache == True:
+            model = torch.compile(model, mode="reduce-overhead", dynamic=True)
+    except Exception as _:
+        # torch.compile may not be available / useful on this env; continue without it
+        print('Could not compile model. Continuing...')
+        pass
 
-            model_path = config['Inference']['model_path']
-            checkpoint = torch.load(model_path, map_location=device)
-            model.load_state_dict(checkpoint["net_state_dict"])
+    test_files = []
+    for material in material_list:
+        if "Pb" in material:
+            print("Adding Pb files to testing set.")
+            test_files += read_text(config['dataset']['testing']['Pb_test_files'])
+        elif "W" in material:
+            print("Adding W files to testing set.")
+            test_files += read_text(config['dataset']['testing']['W_test_files'])
+        elif "Ta" in material:
+            print("Adding Ta files to testing set.")
+            test_files += read_text(config['dataset']['testing']['Ta_test_files'])
 
-            scaler = None
+    global_e_max = config['stats']['global_energy_max']
+    global_e_min = config['stats']['global_energy_min']
+    stats = {"Initial_Energy_Max": global_e_max, "Initial_Energy_Min": global_e_min}
+    
+    dataset = ECAL_Chunked_Dataset(test_files,max_seq_length=msl,
+                energy_digitizer=energy_digitizer,verbose=True,
+                ordering='energy',
+                material_list=material_list,
+                inference_mode=True)
+
+    dataloader = CreateInferenceLoader(dataset,config)
+
+    # choose compact dtypes safely
+    token_dtype = np.uint16 if vocab_size <= 65535 else np.int32
+    if digitize_energy:
+        energy_dtype = np.uint16 if energy_vocab <= 65535 else np.int32
+    else:
+        energy_dtype = np.float32
+        
+    w = ShowerWriterCompound(outfile, token_dtype=token_dtype,
+                            energy_dtype=energy_dtype, compression="lzf")
+
+    kbar = pkbar.Kbar(target=len(dataloader), width=20)
+
+    buffers = {"idx": [], "ene": [], "idx_t": [], "ene_t": [], "initE": [], "material_index": []}
+    flush_size = config['Inference']['flush_size']
+
+    for i, data in enumerate(dataloader):
+        if i == args.num_showers:
+            break
+
+        pos, _ , initial_energy, material_index, initial_energy_t, ene = data
+        pos = pos.to(device).long()
+        initial_energy = initial_energy.to(device).float()
+        material_index = material_index.to(device).long()
+        initial_energy_t = initial_energy_t.numpy()
+
+        torch.cuda.empty_cache()
+
+        with torch.inference_mode():
             if args.use_amp:
-                scaler = GradScaler()
-                if "scaler" in checkpoint:  # load scaler state if present
-                    scaler.load_state_dict(checkpoint["scaler"])
-                    print("Loaded AMP GradScaler state from checkpoint.")
-                else:
-                    print("No GradScaler state found in checkpoint; starting fresh.")
-
-            startEpoch = checkpoint.get("epoch", -1) + 1
-            history = checkpoint.get("history", {})
-            global_step = checkpoint.get("global_step", 0)
-            print(f"Loaded from: {model_path} at epoch {startEpoch}, global_step {global_step}")
-
-            model.eval()
-
-            # (Optional) compile AFTER loading. If you stay on CPU, compiling may not help; feel free to skip.
-            try:
-                if use_kv_cache == True:
-                    model = torch.compile(model, mode="reduce-overhead", dynamic=True)
-            except Exception as _:
-                # torch.compile may not be available / useful on this env; continue without it
-                print('Could not compile model. Continuing...')
-                pass
-
-            test_files = []
-            for material in material_list:
-                if "Pb" in material:
-                    print("Adding Pb files to testing set.")
-                    test_files += read_text(config['dataset']['testing']['Pb_test_files'])
-                elif "W" in material:
-                    print("Adding W files to testing set.")
-                    test_files += read_text(config['dataset']['testing']['W_test_files'])
-                elif "Ta" in material:
-                    print("Adding Ta files to testing set.")
-                    test_files += read_text(config['dataset']['testing']['Ta_test_files'])
-
-            global_e_max = config['stats']['global_energy_max']
-            global_e_min = config['stats']['global_energy_min']
-            stats = {"Initial_Energy_Max": global_e_max, "Initial_Energy_Min": global_e_min}
-            
-            dataset = ECAL_Chunked_Dataset(test_files,max_seq_length=msl,
-                        energy_digitizer=energy_digitizer,verbose=True,
-                        ordering='energy',
-                        material_list=material_list,
-                        inference_mode=True)
-
-            dataloader = CreateInferenceLoader(dataset,config)
-
-            # choose compact dtypes safely
-            token_dtype = np.uint16 if vocab_size <= 65535 else np.int32
-            if digitize_energy:
-                energy_dtype = np.uint16 if energy_vocab <= 65535 else np.int32
+                with autocast(dtype=torch.float16):     
+                    generated_indices, generated_energies = model.generate(
+                        initial_energy=initial_energy,
+                        material_index=material_index,
+                        method=args.sampling_method,
+                        max_seq_len=msl,
+                        temperature=1.0,
+                        use_kv_cache=args.use_kv_cache,    
+                    )
             else:
-                energy_dtype = np.float32
-                
-            w = ShowerWriterCompound(outfile, token_dtype=token_dtype,
-                                    energy_dtype=energy_dtype, compression="lzf")
+                generated_indices, generated_energies = model.generate(
+                    initial_energy=initial_energy,
+                    material_index=material_index,
+                    method=args.sampling_method,
+                    max_seq_len=msl,
+                    temperature=1.0,
+                    use_kv_cache=args.use_kv_cache,
+                )
 
-            kbar = pkbar.Kbar(target=len(dataloader), width=20)
+            generated_indices = generated_indices.detach().cpu().numpy()
+            generated_energies = generated_energies.detach().cpu().numpy()
 
-            buffers = {"idx": [], "ene": [], "idx_t": [], "ene_t": [], "initE": [], "material_index": []}
-            flush_size = config['Inference']['flush_size']
+            true_indices = pos.detach().cpu().numpy()
+            true_energies = ene.numpy().astype(np.float32)
 
-            for i, data in enumerate(dataloader):
-                if i == args.num_showers:
-                    break
+            # collect into buffers (store each shower together)
+            for b in range(generated_indices.shape[0]):
+                # cast to chosen dtypes without copy when possible
+                buffers["idx"].append(generated_indices[b].astype(token_dtype,  copy=False))
+                buffers["idx_t"].append(true_indices[b].astype(token_dtype,  copy=False))
+                if digitize_energy:
+                    buffers["ene"].append(generated_energies[b].astype(energy_dtype, copy=False))
+                    buffers["ene_t"].append(true_energies[b].astype(np.float32, copy=False))
+                else:
+                    buffers["ene_t"].append(true_energies[b].astype(np.float32, copy=False))
+                    buffers["ene"].append(generated_energies[b].astype(np.float32, copy=False))
 
-                pos, _ , initial_energy, material_index, initial_energy_t, ene = data
-                pos = pos.to(device).long()
-                initial_energy = initial_energy.to(device).float()
-                material_index = material_index.to(device).long()
-                initial_energy_t = initial_energy_t.numpy()
+                buffers["initE"].append(float(initial_energy_t[b].item()))
+                buffers['material_index'].append(int(material_index[b].item()))
 
-                torch.cuda.empty_cache()
-
-                with torch.inference_mode():
-                    if args.use_amp:
-                        with autocast(dtype=torch.float16):     
-                            generated_indices, generated_energies = model.generate(
-                                initial_energy=initial_energy,
-                                material_index=material_index,
-                                method=args.sampling_method,
-                                max_seq_len=msl,
-                                temperature=1.0,
-                                use_kv_cache=args.use_kv_cache,    
-                            )
-                    else:
-                        generated_indices, generated_energies = model.generate(
-                            initial_energy=initial_energy,
-                            material_index=material_index,
-                            method=args.sampling_method,
-                            max_seq_len=msl,
-                            temperature=1.0,
-                            use_kv_cache=args.use_kv_cache,
-                        )
-
-                    generated_indices = generated_indices.detach().cpu().numpy()
-                    generated_energies = generated_energies.detach().cpu().numpy()
-
-                    true_indices = pos.detach().cpu().numpy()
-                    true_energies = ene.numpy().astype(np.float32)
-
-                    # collect into buffers (store each shower together)
-                    for b in range(generated_indices.shape[0]):
-                        # cast to chosen dtypes without copy when possible
-                        buffers["idx"].append(generated_indices[b].astype(token_dtype,  copy=False))
-                        buffers["idx_t"].append(true_indices[b].astype(token_dtype,  copy=False))
-                        if digitize_energy:
-                            buffers["ene"].append(generated_energies[b].astype(energy_dtype, copy=False))
-                            buffers["ene_t"].append(true_energies[b].astype(np.float32, copy=False))
-                        else:
-                            buffers["ene_t"].append(true_energies[b].astype(np.float32, copy=False))
-                            buffers["ene"].append(generated_energies[b].astype(np.float32, copy=False))
-
-                        buffers["initE"].append(float(initial_energy_t[b].item()))
-                        buffers['material_index'].append(int(material_index[b].item()))
-
-                        if len(buffers["idx"]) >= flush_size:
-                            print(len(buffers["idx"]), "showers reached flush size. Writing to disk...")
-                            w.append_block(buffers["idx"],
-                                        buffers["ene"],
-                                        buffers["idx_t"],
-                                        buffers["ene_t"],
-                                        buffers["initE"],
-                                        buffers["material_index"])
-                            buffers = {"idx": [], "ene": [], "idx_t": [], "ene_t": [], "initE": [], "material_index": []}   
-
-                # flush remainder
-                if buffers["idx"]:
+                if len(buffers["idx"]) >= flush_size:
+                    print(len(buffers["idx"]), "showers reached flush size. Writing to disk...")
                     w.append_block(buffers["idx"],
                                 buffers["ene"],
                                 buffers["idx_t"],
                                 buffers["ene_t"],
                                 buffers["initE"],
                                 buffers["material_index"])
-                    buffers = {"idx": [], "ene": [], "idx_t": [], "ene_t": [], "initE": [], "material_index": []}
+                    buffers = {"idx": [], "ene": [], "idx_t": [], "ene_t": [], "initE": [], "material_index": []}   
 
-                kbar.update(i + 1)
+        # flush remainder
+        if buffers["idx"]:
+            w.append_block(buffers["idx"],
+                        buffers["ene"],
+                        buffers["idx_t"],
+                        buffers["ene_t"],
+                        buffers["initE"],
+                        buffers["material_index"])
+            buffers = {"idx": [], "ene": [], "idx_t": [], "ene_t": [], "initE": [], "material_index": []}
+
+        kbar.update(i + 1)
 
 
-            w.close()
+    w.close()
 
 
-            print("Generation complete. Output written to: ", outfile)
-            print("Generating plots...")
-            make_plots(outfile, energy_digitizer, material_list=material_list, num_showers=args.num_showers)
+    print("Generation complete. Output written to: ", outfile)
+    print("Generating plots...")
+    make_plots(outfile, energy_digitizer, material_list=material_list, num_showers=args.num_showers)
 
 
 class ShowerWriterCompound:
