@@ -133,8 +133,6 @@ def main(config,args):
             global_e_max = config['stats']['global_energy_max']
             global_e_min = config['stats']['global_energy_min']
             stats = {"Initial_Energy_Max": global_e_max, "Initial_Energy_Min": global_e_min}
-
-            test_files = [test_files[0], test_files[-1]]  # for quick testing; remove for full generation
             
             dataset = ECAL_Chunked_Dataset(test_files,max_seq_length=msl,
                         energy_digitizer=energy_digitizer,verbose=True,
