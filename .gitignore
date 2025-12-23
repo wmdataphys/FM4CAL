@@ -39,12 +39,14 @@ config/
 plotting/
 Generations/
 outputs/
+*Plots*
 # Ignore model weights
 Trained_Models/
 
 # Ignore notebook folders
 notebooks/
 notebook/
+*.ipynb
 */.ipynb_checkpoints/
 .ipynb_checkpoints/
 .jupyter/

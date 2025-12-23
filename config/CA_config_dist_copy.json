@@ -88,9 +88,11 @@
         }
   },
   "Inference": {
-    "model_path": "Trained_Models/25MeVTokens_256Embed_NoMatEmbedding_EnergyOrder___Dec-18-2025/Epoch02_loss_9.990749.pth",
-    "output_file": "Test_256Embed_Epoch2_Ta.h5",
-    "batch_size": 50,
+    "model_path": "Trained_Models/25MeVTokens_256Embed_NoMatEmbedding_EnergyOrder___Dec-18-2025/Epoch14_loss_9.929780.pth",
+    "model_path_384": "Trained_Models/25MeVTokens_384Embed_NoMatEmbedding_EnergyOrder___Dec-19-2025/Epoch07_loss_9.914091.pth",
+    "output_file_": "Test_256Embed_Epoch14_G4_W_G4_Ta.h5",
+    "output_file": "Testingv3.h5",
+    "batch_size": 60,
     "num_workers": 0,
     "initial_energy_min": 10.0,
     "initial_energy_max": 100.0,

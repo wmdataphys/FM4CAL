@@ -1,6 +1,7 @@
 import json
 import math
-
+import h5py
+import os
 import awkward as ak
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -15,18 +16,17 @@ from scipy.stats import wasserstein_distance
 
 vector.register_awkward()
 
-import gabbro.plotting.utils as plot_utils
-from gabbro.metrics.utils import quantiled_kl_divergence
-from gabbro.plotting.utils import plot_ratios
-from gabbro.utils.utils import (
+import utils.plotting_utils as plot_utils
+from utils.metrics import quantiled_kl_divergence
+from utils.plotting_utils import (
     KL,
     find_max_energy_z,
     get_COG_ak,
     sum_energy_per_layer,
     sum_energy_per_radial_distance,
     write_distances_to_json,
+    plot_ratios
 )
-
 
 
 def binclip(x, bins, dropinf=False):
@@ -1469,7 +1469,7 @@ def add_divergence_metrics(ax, data1, data2, bins, feature, fontsize, **kwargs):
     )
 
 
-def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = None, **kwargs):
+def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = None, material: str = None, **kwargs):
     """Plots the features of multiple constituent or shower sets.
 
     Args:
@@ -1823,5 +1823,105 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax0.legend(handles=legend_elements, loc="upper right", fontsize=fontsize_labels - 5, ncol=2)
     ax4.legend(handles=legend_elements, loc="upper right", fontsize=fontsize_labels - 5, ncol=2)
     ax1.legend(handles=legend_elements, loc="upper right", fontsize=fontsize_labels - 5, ncol=2)
+    ax1.set_title(f"Material: {material}", fontsize=22)
 
     return fig
+
+
+def decode_hits(tokens, energies, grid_size=30, SOS_token=0, EOS_token=27001,PAD_token=27002,ground_truth=False):
+    tokens = np.asarray(tokens)
+    energies = np.asarray(energies)
+    
+    # Remove SOS, EOS or PAD
+    pixel_mask_tokens = np.array([PAD_token, SOS_token, EOS_token])
+    pixel_mask = ~np.isin(tokens, pixel_mask_tokens)
+    mask = pixel_mask # must be valid in both pixel and energy - this is taken care of, see generate() function of GPT.py
+    
+    tokens = tokens[mask] - 1 # tokens are offset by 1
+    energies = energies[mask]
+    
+    # Convert flat token -> (z, y, x)
+    z = tokens // (grid_size * grid_size)
+    rem = tokens % (grid_size * grid_size)
+    y = rem // grid_size
+    x = rem % grid_size
+
+    assert energies.any() != -1
+
+    # Safety check
+    if np.any(tokens < 0) or np.any(tokens >= grid_size**3):
+        raise ValueError("Decoded token out of [0, grid_size^3). Check token definitions.")
+
+    return z,x,y,energies
+
+        
+
+def read_generated(file_path,tokenizer,material_list=["G4_W","G4_Ta"],num_showers=-1,material="G4_W"):
+    with h5py.File(file_path,"r") as h5file:
+        showers = h5file['showers'][()]
+
+        data_dict = {
+            "x": [],
+            "y": [],
+            "z": [],
+            "energy": [],
+        }
+
+        data_dict_truth = {
+            "x": [],
+            "y": [],
+            "z": [],
+            "energy": []
+        }
+
+        if num_showers == -1:
+            num_showers = len(showers)
+        
+        for i,shower in enumerate(showers):
+            init_E,spatial,energy,spatial_truth,energy_truth,material_index = shower
+            mat = material_list[material_index]
+            if mat != material:
+                continue
+            
+            # Primary decode step
+            # Decode indices to x,y,z and filter tokens
+            x,y,z,E = decode_hits(spatial,energy)
+            E = tokenizer.de_tokenize(E) # convert energy tokens back to energy values
+
+            xt,yt,zt,Et = decode_hits(spatial_truth,energy_truth)
+            
+            if i % 5000 == 0 or i == num_showers:
+                print(f"Shower #: {i}/{num_showers}, Material: {mat}")
+
+            data_dict["z"].append(x)
+            data_dict["x"].append(y)
+            data_dict["y"].append(z)
+            data_dict["energy"].append(E)
+            
+            data_dict_truth["z"].append(xt)
+            data_dict_truth["x"].append(yt)
+            data_dict_truth["y"].append(zt)
+            data_dict_truth["energy"].append(Et)
+
+            if i == num_showers:
+                break
+
+        ak_array = ak.Array(data_dict)
+        ak_array_truth = ak.Array(data_dict_truth)
+        return ak_array,ak_array_truth
+
+def make_plots(file_path,tokenizer,material_list=["G4_W","G4_Ta"],num_showers=-1):
+    
+    os.makedirs("Plots",exist_ok=True)
+    filename = file_path.split("/")[-1][:-3]
+
+    for material in material_list:
+        generated_features, ground_truth_features = read_generated(file_path, tokenizer, material_list, num_showers, material)
+        fig = plot_paper_plots(
+            [ground_truth_features, generated_features],
+            labels=["Ground Truth", "Generated"],
+            colors=["lightgrey", "cornflowerblue"], material=material
+        )
+
+        fig.savefig(f"Plots/{filename}_{material}.pdf", dpi=300)
+

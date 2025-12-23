@@ -11,8 +11,9 @@ def ECAL_collate_inference(batch, max_seq_length=1700):
     initial_energies = []
     material_indices = []
     initial_energy_t = []
+    energy_copies = []
 
-    for pos, ene, initial_energy, material_index, init_e_t in batch:
+    for pos, ene, initial_energy, material_index, init_e_t, energy_copy in batch:
         # Already padded
         positions.append(torch.tensor(pos))
         energies.append(torch.tensor(ene))
@@ -20,10 +21,11 @@ def ECAL_collate_inference(batch, max_seq_length=1700):
         material_indices.append(torch.tensor(material_index))
 
         initial_energy_t.append(torch.tensor(init_e_t)) # Unscaled eenergy
+        energy_copies.append(torch.tensor(energy_copy)) # Ground truth energy copy
 
 
     return torch.stack(positions), torch.stack(energies), torch.tensor(initial_energies), torch.stack(material_indices), \
-           torch.tensor(initial_energy_t)
+           torch.tensor(initial_energy_t), torch.stack(energy_copies)
 
 def CreateInferenceLoader(dataset,config):
     loader = DataLoader(dataset,

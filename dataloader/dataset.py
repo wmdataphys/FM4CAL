@@ -21,7 +21,7 @@ class ECAL_Chunked_Dataset(Dataset):
                  inference_mode: bool = False
                     ):
 
-        # Constant shape per shot
+        # Constant shape per shower
         self.shape = (30, 30, 30)
         self.max_seq_length = max_seq_length
         self.energy_digitizer = energy_digitizer
@@ -50,6 +50,10 @@ class ECAL_Chunked_Dataset(Dataset):
         mask = (values > self.energy_digitizer.e_min + self.energy_digitizer.energy_res) & (values < self.energy_digitizer.e_max - self.energy_digitizer.energy_res)
         pixels = flat[mask]
         energies = values[mask]
+        energy_copy = None
+
+        if self.inference_mode:
+            energy_copy = energies.copy()
 
         energies = self.energy_digitizer.tokenize(energies)  # Tokenize energies only for nonzero voxels
 
@@ -57,17 +61,21 @@ class ECAL_Chunked_Dataset(Dataset):
             order = np.argsort(energies)[::-1]  # descending
             pixels_sorted = pixels[order]
             energies_sorted = energies[order]
+            if self.inference_mode:
+                energy_copy = energy_copy[order]
 
         elif self.ordering == 'spatial':  # spatial
             order = np.argsort(pixels)  # ascending
             pixels_sorted = pixels[order]
             energies_sorted = energies[order]
+            if self.inference_mode:
+                energy_copy = energy_copy[order]
         else:
             raise ValueError(f"Unknown ordering: {self.ordering}")
 
         assert(len(pixels_sorted) == len(energies_sorted))
 
-        return pixels_sorted, energies_sorted
+        return pixels_sorted, energies_sorted, energy_copy 
 
     def _load_all_into_memory(self):
         if self.energy_digitizer is None:
@@ -94,23 +102,18 @@ class ECAL_Chunked_Dataset(Dataset):
                     if initial_energy < self.global_stats["Initial_Energy_Min"] or initial_energy > self.global_stats["Initial_Energy_Max"]:
                         continue
 
-                    if self.inference_mode:
-                        ground_truth_cache.append(initial_energy)
-
                     material_index = self.material_list.index(material)
                     initial_energy = ((initial_energy - self.global_stats["Initial_Energy_Min"]) / (self.global_stats["Initial_Energy_Max"] - self.global_stats["Initial_Energy_Min"])) * 2 - 1.0 # Scale to roughly -1 to 1
 
                     # Tokenize + order
-                    sorted_positions, sorted_energies = self._encode_sample(indices, values)
-
-                    # # Add SOS/EOS
-                    # sorted_positions = np.insert(sorted_positions, 0, self.SOS_token)
-                    # sorted_positions = np.append(sorted_positions, self.EOS_token)
-
-                    # sorted_energies = np.insert(sorted_energies, 0, self.SOS_token)
-                    # sorted_energies = np.append(sorted_energies, self.energy_EOS_token)
+                    sorted_positions, sorted_energies, energy_copy = self._encode_sample(indices, values)
 
                     cache.append((sorted_positions, sorted_energies, initial_energy, material_index))
+
+                    if self.inference_mode:
+                        # We will decode the pixels later, but use ground truth energies for plotting   
+                        # Remove any bias in smearing processes later, although is negligible
+                        ground_truth_cache.append((initial_energy, energy_copy))
 
 
         if not self.inference_mode:
@@ -125,7 +128,7 @@ class ECAL_Chunked_Dataset(Dataset):
 
     def __getitem__(self, idx):
         pos, ene, initial_energy, material_index = self.memory_cache[idx]
-        initial_energy_t = self.ground_truth_cache[idx]
+        
         assert len(pos) == len(ene)
         
         # Truncate if too long (reserve space for SOS/EOS)
@@ -149,5 +152,18 @@ class ECAL_Chunked_Dataset(Dataset):
             return pos, ene, initial_energy, material_index
 
         else:
-            return pos, ene, initial_energy, material_index, initial_energy_t
+            initial_energy_t, energy_copy = self.ground_truth_cache[idx]
+            
+
+            if len(energy_copy) > self.max_seq_length - 2:
+                energy_copy = energy_copy[:self.max_seq_length - 2]  # Mimick reserving two spaces, apply -1 for SOS/EOS
+                
+            energy_copy = np.insert(energy_copy, 0, -1.0)  # SOS energy = -1
+            energy_copy = np.append(energy_copy, -1.0)  # EOS energy = -1
+
+            if len(energy_copy) < self.max_seq_length:
+                # Have to pad for collate function
+                energy_copy = np.pad(energy_copy, (0, self.max_seq_length - len(energy_copy)), constant_values=-1.0)  # Pad energy copy with -1
+
+            return pos, ene, initial_energy, material_index, initial_energy_t, energy_copy
 
