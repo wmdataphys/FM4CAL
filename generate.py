@@ -51,7 +51,15 @@ def main(config,args):
     energy_res = config['stats']['token_energy_res']
     e_max = config['stats']['token_energy_max']
     e_min = config['stats']['token_energy_min']
-   
+
+    if args.materials_to_generate is not None:
+        materials_to_generate = args.materials_to_generate
+        print("Generating for specified materials: ", materials_to_generate)
+    else:
+        materials_to_generate = material_list
+        print("Generating for all materials in config: ", materials_to_generate)
+    
+    print(material_list)
     energy_digitizer = EnergyTokenizer(e_max=e_max, e_min=e_min, resolution=energy_res)
     outfile = os.path.join("Generations", config['Inference']['output_file'])
 
@@ -60,7 +68,7 @@ def main(config,args):
         response = input().strip().lower()
         if response != 'y':
             print("Generation aborted by user, running plotting code only.")
-            make_plots(outfile, energy_digitizer, material_list=material_list, num_showers=args.num_showers)
+            make_plots(outfile, energy_digitizer,materials_to_plot=materials_to_generate, num_showers=args.num_showers,material_list=material_list)
             exit(0)
 
     print("========= Generation Started =========")
@@ -119,7 +127,7 @@ def main(config,args):
         pass
 
     test_files = []
-    for material in material_list:
+    for material in materials_to_generate:
         if "Pb" in material:
             print("Adding Pb files to testing set.")
             test_files += read_text(config['dataset']['testing']['Pb_test_files'])
@@ -239,7 +247,7 @@ def main(config,args):
 
     print("Generation complete. Output written to: ", outfile)
     print("Generating plots...")
-    make_plots(outfile, energy_digitizer, material_list=material_list, num_showers=args.num_showers)
+    make_plots(outfile, energy_digitizer,materials_to_plot=materials_to_generate, num_showers=args.num_showers,material_list=material_list)
 
 
 class ShowerWriterCompound:
@@ -306,6 +314,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_kv_cache', action='store_true', help='Whether to use KV cache during generation.')
     parser.add_argument('--use_amp', action='store_true', help='Whether to use automatic mixed precision.')
     parser.add_argument('--num_showers', type=int, default=-1, help='Number of showers to generate for plotting. -1 for all.')
+    parser.add_argument('--materials_to_generate', type=str, nargs='+', default=None, help='List of materials to generate showers for. If not set, generates for all materials in config.')
     #parser.add_argument('--material', type=str, default='G4_W', help='Material to generate showers for [G4_W, G4_Pb, G4_Ta].')
     args = parser.parse_args()
 

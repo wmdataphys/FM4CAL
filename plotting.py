@@ -1856,7 +1856,7 @@ def decode_hits(tokens, energies, grid_size=30, SOS_token=0, EOS_token=27001,PAD
 
         
 
-def read_generated(file_path,tokenizer,material_list=["G4_W","G4_Ta"],num_showers=-1,material="G4_W"):
+def read_generated(file_path,tokenizer,material_list=["G4_W","G4_Ta","G4_Pb"],num_showers=-1,material="G4_W"):
     with h5py.File(file_path,"r") as h5file:
         showers = h5file['showers'][()]
 
@@ -1910,12 +1910,16 @@ def read_generated(file_path,tokenizer,material_list=["G4_W","G4_Ta"],num_shower
         ak_array_truth = ak.Array(data_dict_truth)
         return ak_array,ak_array_truth
 
-def make_plots(file_path,tokenizer,material_list=["G4_W","G4_Ta"],num_showers=-1):
+def make_plots(file_path,tokenizer,materials_to_plot=None,num_showers=-1,material_list=["G4_W","G4_Ta","G4_Pb"]):
     
+    if materials_to_plot is None:
+        raise ValueError("materials_to_plot must be provided as a list of material names.")
+
     os.makedirs("Plots",exist_ok=True)
     filename = file_path.split("/")[-1][:-3]
 
-    for material in material_list:
+    for material in materials_to_plot:
+        print("Making plots for material:",material)
         generated_features, ground_truth_features = read_generated(file_path, tokenizer, material_list, num_showers, material)
         fig = plot_paper_plots(
             [ground_truth_features, generated_features],

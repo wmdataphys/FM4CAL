@@ -16,18 +16,28 @@ class Expert(nn.Module):
 
 
 class Router(nn.Module):
-    def __init__(self,embed_dim,num_experts=4,num_classes=2,epsilon=0.01,device='cuda'):
+    def __init__(self,embed_dim,num_experts=4,num_classes=2,epsilon=0.01,
+                     freeze_old_classes=False, old_num_classes=None,device='cuda'):
         super().__init__()
         assert num_experts % num_classes == 0
         self.device = device
         self.epsilon = 0.1
-        # Supervised routing - split the experts into all PIDs
+        self.freeze_old_classes = freeze_old_classes
+        self.old_num_classes = old_num_classes
+        # Supervised routing - split the experts into all materials
         # We enforce the load to be balanced
         self.k = num_experts // num_classes # experts per class 
         targets = [i for i in range(num_classes) for _ in range(num_experts // num_classes)]
         self.expert_index = torch.tensor(targets,dtype=torch.long).to(self.device)
         self.router = nn.Linear(embed_dim,num_experts)
 
+    def mask_old_expert_grads(self,grad):
+        grad_masked = grad.clone()
+        num_old_experts = self.old_num_classes * self.k
+        grad_masked[:, :, :num_old_experts] = 0.0
+        return grad_masked
+            
+        
     def forward(self,x,class_label,padding_mask=None,return_indices=False):
         loss = None
         indices = None
@@ -42,6 +52,11 @@ class Router(nn.Module):
         routing.masked_fill_(mask,-torch.inf)
 
         weights = F.softmax(routing,dim=-1)
+
+        # Triggered in fine tuning when adding experts
+        if (self.training and weights.requires_grad and
+            self.freeze_old_classes and self.old_num_classes is not None):
+            weights.register_hook(self.mask_old_expert_grads)
 
         if self.training:
             if self.k == 1:

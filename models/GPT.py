@@ -2,7 +2,7 @@ import math
 import numpy as np
 import pkbar
 
-from models.MoE import MoE
+from models.MoE import MoE, Router, Expert
 
 import torch
 import torch.nn as nn
@@ -504,6 +504,78 @@ class ECAL_GPT(nn.Module):
         self.pad_token = space_vocab - 1  
         self.EOS_energy_token = energy_vocab - 2  
         self.energy_pad_token = energy_vocab - 1  
+
+    def extend_materials(self, new_material_list):
+        # Extend model to an additional material by adding experts and updating the router
+        # Assumes experts per class is constant 
+        # See fine_tune.py for usage during fine-tuning; assumes loading of N-1 expert model.
+        # Eventually want to comment out print statements - annoying in multi GPU training
+        if not self.use_MoE:
+            raise ValueError("Model is not using MoE; cannot extend materials.")
+
+        current_num_classes = len(self.material_list)
+        new_num_classes = len(new_material_list)
+        
+        if new_num_classes <= current_num_classes:
+            print("No new materials to add. Something is likely wrong.")
+            exit(1)
+
+        # experts per class should be same for all classes
+        experts_per_class = self.num_experts // current_num_classes
+        new_num_experts = new_num_classes * experts_per_class
+
+        print(f"Extending from {self.material_list} to {new_material_list}")
+        print(f"Current: {current_num_classes} classes * {experts_per_class} experts/class = {self.num_experts} total")
+        print(f"New:     {new_num_classes} classes * {experts_per_class} experts/class = {new_num_experts} total")
+        
+        self.material_list = new_material_list
+        self.num_classes = new_num_classes
+        self.num_experts = new_num_experts
+
+        for layer_idx, layer in enumerate(self.layers):
+            if hasattr(layer, 'FF') and isinstance(layer.FF, MoE):
+                old_moe = layer.FF
+                current_num_experts = old_moe.num_experts
+                
+                print(f"Layer {layer_idx}: Extending MoE from {current_num_experts} -> {new_num_experts} experts")
+                
+                # Old router was [B,seq,E] -> [B,seq,current_num_experts]
+                # New router will be [B,seq,E] -> [B,seq,new_num_experts]
+                # We will copy old weights in, and freeze current_num_experts weights (i.e., previous models' experts)
+                new_router = Router(
+                    embed_dim=old_moe.embed_dim,
+                    num_experts=new_num_experts,
+                    num_classes=new_num_classes,
+                    freeze_old_classes=True,
+                    old_num_classes=current_num_classes,
+                    device=self.device
+                )
+                
+                # Copy old router weights and initialize new class outputs
+                with torch.no_grad():
+                    new_router.router.weight.data[:current_num_experts, :] = old_moe.router.router.weight.data
+                    new_router.router.bias.data[:current_num_experts] = old_moe.router.router.bias.data
+                    
+                    # Initialize new class expert outputs by copying last expert's weights for now? probably perturb it in the future
+                    for i in range(current_num_experts, new_num_experts):
+                        copy_from_idx = current_num_experts - 1  # last old expert
+                        new_router.router.weight.data[i, :] = old_moe.router.router.weight.data[copy_from_idx, :]
+                        new_router.router.bias.data[i] = old_moe.router.router.bias.data[copy_from_idx]
+                
+                # Add new experts (experts_per_class experts for the new class)
+                num_new_experts = new_num_experts - current_num_experts
+                for i in range(num_new_experts):
+                    old_moe.experts.append(
+                        Expert(old_moe.embed_dim, old_moe.mlp_scale, old_moe.drop_rate)
+                    )
+                
+                # Replace router and update MoE attributes
+                old_moe.router = new_router
+                old_moe.num_experts = new_num_experts
+                old_moe.num_classes = new_num_classes
+
+        print(f"Extended to {self.num_experts} experts for materials: {self.material_list}")
+
 
     def embed_space_tokens(self, idx, pos_idx):
         """

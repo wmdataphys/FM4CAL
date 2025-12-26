@@ -92,6 +92,8 @@ class Trainer:
         self.EOS_token = config['special_tokens']['EOS_token']
         self.stats = config['stats']
         self.max_seq_length = config['model']['max_seq_length']
+        # Obtain from config, base model trained on these materials
+        self.material_list = config['material_list']
 
         if self.rank == 0:
             print("Network Parameters: ",t_params)
@@ -135,7 +137,9 @@ class Trainer:
         global_e_max = self.stats['global_energy_max']
         global_e_min = self.stats['global_energy_min']
         stats = {"Initial_Energy_Max": global_e_max, "Initial_Energy_Min": global_e_min}
-        dataset = ECAL_Chunked_Dataset(file_list=file_list,max_seq_length=self.max_seq_length,energy_digitizer=self.energy_digitizer,verbose=verbose,ordering='energy',global_stats=stats)
+        dataset = ECAL_Chunked_Dataset(file_list=file_list,max_seq_length=self.max_seq_length,energy_digitizer=self.energy_digitizer
+                                       ,verbose=verbose,ordering='energy',global_stats=stats,
+                                       material_list=self.material_list)
         sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True)
         loader = CreateLoaderMoE(dataset, sampler=sampler, batch_size=self.config['dataloader']['train']['batch_size_cls'] // self.world_size,
                                 num_workers=self.config['dataloader']['train']['num_workers'],
