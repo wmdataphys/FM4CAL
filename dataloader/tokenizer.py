@@ -1,7 +1,7 @@
 import numpy as np
 
 class EnergyTokenizer():
-    def __init__(self, e_max=25.0, e_min=1e-15, resolution=0.001):
+    def __init__(self, e_max=35.0, e_min=1e-15, resolution=0.0014):
         super().__init__()
         self.e_max = e_max
         self.e_min = e_min

@@ -3,7 +3,7 @@
   "seed": 42,
   "digitize_energy": true,
   "use_amp": true,
-  "material_list": ["G4_W", "G4_Ta", "G4_Pb"],
+  "material_list": ["G4_W", "G4_Ta"],
   "output": {
     "dir": "/sciclone/data10/jgiroux/ECAL_Cole/ECAL_Models"
   },
@@ -49,9 +49,9 @@
   "stats": {
     "global_energy_max": 100.0,
     "global_energy_min": 10.0,
-    "token_energy_max": 25.0,
+    "token_energy_max": 35.0,
     "token_energy_min": 1e-15,
-    "token_energy_res": 0.001
+    "token_energy_res": 0.0014
   },
   "optimizer": {
     "lr": 0.0001,
@@ -88,11 +88,12 @@
         }
   },
   "Inference": {
-    "model_path": "Trained_Models/FineTuning_W_Ta_with_Pb_V1___Dec-26-2025/Epoch01_loss_9.986434.pth",
+    "model_path": "Trained_Models/FullScaleModel_W_Ta_10MEvents_35MeVTokenMax___Dec-31-2025/Epoch00_loss_9.676823.pth",
+    "model_path_": "Trained_Models/FineTuning_W_Ta_with_Pb_V1___Dec-26-2025/Epoch07_loss_9.960306.pth",
     "model_path_256": "Trained_Models/25MeVTokens_256Embed_NoMatEmbedding_EnergyOrder___Dec-18-2025/Epoch16_loss_9.931702.pth",
     "model_path_384": "Trained_Models/25MeVTokens_384Embed_NoMatEmbedding_EnergyOrder___Dec-19-2025/Epoch07_loss_9.914091.pth",
-    "output_file": "Pb_FineTuneTest_Epoch1.h5",
-    "batch_size": 60,
+    "output_file": "FullScaleModel_Ta_W_Epoch1.h5",
+    "batch_size": 70,
     "num_workers": 0,
     "initial_energy_min": 10.0,
     "initial_energy_max": 100.0,

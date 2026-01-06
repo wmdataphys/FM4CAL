@@ -107,6 +107,12 @@ class Trainer:
         self.energy_loss_fn = None  # you’ll need to define this or import it
 
         self.optimizer = torch.optim.RAdam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=float(config['optimizer']['lr']))
+        self.num_epochs = config['num_epochs']
+        # Decrease LR at epoch 1,10,50,75% of total epochs
+        # LR goes like Epoch 0:1e-3 -> Epoch 1:1e-4 -> Epoch 50:1e-5 -> Epoch 75:1e-6
+        milestones = [1,int(0.1 * self.num_epochs), int(0.5 * self.num_epochs), int(0.75 * self.num_epochs)]
+        self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=milestones,gamma=0.1)
+        print("Using LR Scheduler with milestones at epochs: ", milestones)
         self.history = {'train_loss': [], 'val_loss': []}
         self.global_step = 0
         self.epoch = 0
@@ -295,7 +301,8 @@ class Trainer:
             torch.save({
                 'net_state_dict': self.model.module.state_dict(),
                 'optimizer': self.optimizer.state_dict(),
-                'epoch': self.epoch,
+                'scheduler': self.scheduler.state_dict(),
+                'epoch': self.epoch + 1,
                 'history': self.history,
                 'global_step': self.global_step,
             }, filename)
@@ -334,6 +341,9 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, state_d
             trainer.history = checkpoint.get('history', trainer.history)
             trainer.global_step = checkpoint.get('global_step', 0)
             print(f"Rank {rank} - Loaded optimizer state from checkpoint, starting at epoch {trainer.epoch}.")
+        if 'scheduler' in checkpoint:
+            trainer.scheduler.load_state_dict(checkpoint['scheduler'])
+            print(f"Rank {rank} - Loaded scheduler state from checkpoint.")
         else:
             trainer.epoch = 0
             trainer.global_step = 0
@@ -348,6 +358,9 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, state_d
         torch.cuda.empty_cache()  
         gc.collect()
 
+        if rank == 0:
+            print("Learning rate: ", trainer.scheduler.get_last_lr()[0])
+
         shuffled_files = np.array(all_train_files)[np.random.permutation(len(all_train_files))].tolist()
         
         for start_idx in range(0, num_files, chunk_size):
@@ -359,7 +372,9 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, state_d
 
             #print("Starting training for epoch", epoch, "chunk", start_idx // chunk_size + 1)
             trainer.train_epoch(train_loader, sampler)
-
+        
+        trainer.scheduler.step()
+ 
         if run_val:
             random_idx = np.random.randint(0, len(all_val_files), val_chunk_size)
             #print("Starting validation for epoch", epoch)
@@ -367,7 +382,7 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, state_d
             trainer.on_epoch_end(val_loader,write_path)
         else:
             trainer.on_epoch_end(write_path)
-    
+
     dist.destroy_process_group()
 
 
