@@ -101,47 +101,61 @@ class CrossAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x,
-                e_embed,
-                attn_mask=None,
-                key_padding_mask=None,
-                need_weights=False,
-                past_kv=None):
+    def forward(self, x, e_embed, attn_mask=None, key_padding_mask=None,
+                need_weights=False, past_kv=None):
         """
-        x:         [B, T_new, E]  (space stream newest token, T_new=1 at decode)
-        e_embed:   [B, T_new, E]  (time stream newest token, T_new=1 at decode)
-        past_kv:   Optional[Tuple[Kpast, Vpast]] over x
-        Returns: (attn_out, (K_all, V_all))
+        x:         [B, T_new, E]
+        e_embed:   [B, T_new, E]
+        past_kv:   Dict with {'k': cache_k, 'v': cache_v, 'seq_len': int} or None
+        Returns: (attn_out, updated_cache_dict)
         """
         batch_size, seq_len, embed_dim = x.shape
 
-        # Updated to swap Q and KV from position to energy
         q, k, v = self.q_proj(e_embed), self.k_proj(x), self.v_proj(x)
 
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
 
-        k = k.transpose(1, 2)  # [B,H,1,D]
-        q = q.transpose(1, 2)  # [B,H,1,D]
-        v = v.transpose(1, 2)  # [B,H,1,D]
+        k = k.transpose(1, 2)  # [B, H, T_new, D]
+        q = q.transpose(1, 2)
+        v = v.transpose(1, 2)
 
-        # normalize QK matrices with L2 norm over head dim, learnable scale clamped to d_k 
+        # Normalize Q and K
         if self.qk_norm:
             k = F.normalize(k, p=2, dim=-1)
             q = F.normalize(q, p=2, dim=-1)
 
-            if past_kv is not None:
-                k = torch.cat([past_kv[0], k], dim=2)
-                v = torch.cat([past_kv[1], v], dim=2)
-
-            attn_scores = self.g_scale * q @ k.transpose(2, 3)
-
+        # Handle KV cache with pre-allocation
+        if past_kv is not None:
+            cache_k = past_kv['k']
+            cache_v = past_kv['v']
+            curr_len = past_kv['seq_len']
+            
+            # Write new K,V into pre-allocated cache
+            cache_k[:, :, curr_len:curr_len+seq_len] = k
+            cache_v[:, :, curr_len:curr_len+seq_len] = v
+            
+            # Update sequence length
+            new_len = curr_len + seq_len
+            
+            # Use cache up to current position
+            k = cache_k[:, :, :new_len]
+            v = cache_v[:, :, :new_len]
+            
+            # Update cache dict for return
+            updated_cache = {
+                'k': cache_k,
+                'v': cache_v,
+                'seq_len': new_len
+            }
         else:
-            if past_kv is not None:
-                k = torch.cat([past_kv[0], k], dim=2)
-                v = torch.cat([past_kv[1], v], dim=2)
+            updated_cache = None
 
+        # Compute attention scores
+        if self.qk_norm:
+            attn_scores = self.g_scale * q @ k.transpose(2, 3)
+        else:
             attn_scores = self.d_k * q @ k.transpose(2, 3)
 
         if attn_mask is not None:
@@ -151,17 +165,16 @@ class CrossAttention(nn.Module):
             key_padding_mask = key_padding_mask[:, None, None, :]
             attn_scores.masked_fill_(key_padding_mask, -torch.inf)
 
-        attn_scores = F.softmax(attn_scores, dim=-1)  # consider forcing to float32
+        attn_scores = F.softmax(attn_scores, dim=-1)
         attn_scores = self.dropout(attn_scores)
 
         attn_output = (attn_scores @ v).transpose(1, 2)
-
         attn_output = attn_output.contiguous().view(batch_size, seq_len, embed_dim)
 
         if need_weights:
             return attn_output, attn_scores
         else:
-            return (attn_output, (k, v))
+            return (attn_output, updated_cache)
 
 
 class CATransformerBlock(nn.Module):
@@ -219,8 +232,9 @@ class CATransformerBlock(nn.Module):
         #     attn, attn_weights = self.attn(x_norm, e_norm, attn_mask=mask_, key_padding_mask=padding_mask, need_weights=False)
         # else:
         #     attn, attn_weights = self.attn(x_norm, e_norm, key_padding_mask=paddig_mask, need_weights=False)
+        need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
+        mask_ = self.generate_mask(N_t) if need_causal else None
 
-        mask_ = self.generate_mask(N_t)
 
         attn_out, kv_ca = self.attn(x_norm,
                                     e_norm,
@@ -257,16 +271,12 @@ class MHSA(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self,
-                x,
-                attn_mask=None,
-                key_padding_mask=None,
-                need_weights=False,
-                past_kv=None):
+    def forward(self, x, attn_mask=None, key_padding_mask=None,
+                need_weights=False, past_kv=None):
         """
-        x: [B, T_new, E], where at decode T_new = 1
-        past_kv: Optional[Tuple[Kpast, Vpast]], both [B, H, T_past, D]
-        Returns: (attn_out, (K_all, V_all))
+        x: [B, T_new, E]
+        past_kv: Dict with {'k': cache_k, 'v': cache_v, 'seq_len': int} or None
+        Returns: (attn_out, updated_cache_dict)
         """
         batch_size, T_new, embed_dim = x.shape
 
@@ -276,46 +286,64 @@ class MHSA(nn.Module):
         v = v.view(batch_size, T_new, self.num_heads, self.head_dim)
         q = q.view(batch_size, T_new, self.num_heads, self.head_dim)
 
-        k = k.transpose(1, 2)   # [B,H,T_new,D]
-        q = q.transpose(1, 2)   # [B,H,T_new,D]
-        v = v.transpose(1, 2)   # [B,H,T_new,D]
+        k = k.transpose(1, 2)  # [B, H, T_new, D]
+        q = q.transpose(1, 2)
+        v = v.transpose(1, 2)
 
-        # normalize QK matrices with L2 norm over head dim, learnable scale init to d_k
+        # Normalize Q and K
         if self.qk_norm:
             k = F.normalize(k, p=2, dim=-1)
             q = F.normalize(q, p=2, dim=-1)
 
-            if past_kv is not None:
-                k = torch.cat([past_kv[0], k], dim=2)  # concat on seq dim
-                v = torch.cat([past_kv[1], v], dim=2)
+        # Handle KV cache with pre-allocation
+        if past_kv is not None:
+            cache_k = past_kv['k']
+            cache_v = past_kv['v']
+            curr_len = past_kv['seq_len']
+            
+            # Write new K,V into pre-allocated cache
+            cache_k[:, :, curr_len:curr_len+T_new] = k
+            cache_v[:, :, curr_len:curr_len+T_new] = v
+            
+            # Update sequence length
+            new_len = curr_len + T_new
+            
+            # Use cache up to current position
+            k = cache_k[:, :, :new_len]
+            v = cache_v[:, :, :new_len]
+            
+            # Update cache dict for return
+            updated_cache = {
+                'k': cache_k,
+                'v': cache_v,
+                'seq_len': new_len
+            }
+        else:
+            updated_cache = None
 
+        # Compute attention scores
+        if self.qk_norm:
             attn_scores = self.g_scale * q @ k.transpose(2, 3)
         else:
-            if past_kv is not None:
-                k = torch.cat([past_kv[0], k], dim=2)  # concat on seq dim
-                v = torch.cat([past_kv[1], v], dim=2)
-
             attn_scores = self.d_k * q @ k.transpose(2, 3)
 
         if attn_mask is not None:
             attn_scores.masked_fill_(attn_mask, -torch.inf)
 
         if key_padding_mask is not None:
-            # key_padding_mask: [B, T_total]
             key_padding_mask = key_padding_mask[:, None, None, :]
             attn_scores.masked_fill_(key_padding_mask, -torch.inf)
 
-        attn_scores = F.softmax(attn_scores, dim=-1)  # consider forcing to float32
+        attn_scores = F.softmax(attn_scores, dim=-1)
         attn_scores = self.dropout(attn_scores)
 
         attn_output = (attn_scores @ v).transpose(1, 2)
-
         attn_output = attn_output.contiguous().view(batch_size, T_new, embed_dim)
 
         if need_weights:
             return attn_output, attn_scores
         else:
-            return (attn_output, (k, v))
+            return (attn_output, updated_cache)
 
 
 class TransformerBlock(nn.Module):
@@ -364,7 +392,10 @@ class TransformerBlock(nn.Module):
         # else:
         #     attn, attn_weights = self.attn(x_norm, key_padding_mask=padding_mask, need_weights=need_weights)
 
-        mask_ = self.generate_mask(N_t)
+        need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
+        mask_ = self.generate_mask(N_t) if need_causal else None
+
+
         attn_out, kv_mhsa = self.attn(
                                 x_norm,
                                 key_padding_mask=padding_mask,
@@ -504,6 +535,41 @@ class ECAL_GPT(nn.Module):
         self.pad_token = space_vocab - 1  
         self.EOS_energy_token = energy_vocab - 2  
         self.energy_pad_token = energy_vocab - 1  
+
+    def _allocate_kv_cache(self, batch_size, max_len, device, dtype=torch.float16):
+        """
+        Pre-allocate KV cache buffers to avoid concatenation overhead.
+        
+        Returns list of dicts, one per layer:
+        [{'k': tensor, 'v': tensor, 'seq_len': 0}, ...]
+        """
+        cache_list = []
+        
+        for layer in self.layers:
+            if isinstance(layer, CATransformerBlock):
+                num_heads = layer.attn.num_heads
+                head_dim = layer.attn.head_dim
+            else:  # TransformerBlock
+                num_heads = layer.attn.num_heads
+                head_dim = layer.attn.head_dim
+            
+            # Pre-allocate cache: [B, H, max_len, D]
+            cache_k = torch.zeros(
+                batch_size, num_heads, max_len, head_dim,
+                dtype=dtype, device=device
+            )
+            cache_v = torch.zeros(
+                batch_size, num_heads, max_len, head_dim,
+                dtype=dtype, device=device
+            )
+            
+            cache_list.append({
+                'k': cache_k,
+                'v': cache_v,
+                'seq_len': 0  # Tracks how many tokens are cached
+            })
+        
+        return cache_list
 
     def extend_materials(self, new_material_list):
         # Extend model to an additional material by adding experts and updating the router
@@ -726,86 +792,105 @@ class ECAL_GPT(nn.Module):
     @torch.inference_mode()
     def generate(self, initial_energy, material_index, max_seq_len=1700,
                 context_len=None, temperature: float = 1.0, method="Default",
-                topK=100, nucleus_p=0.98, dynamic_temp=False, use_kv_cache=False):
+                topK=100, nucleus_p=0.98, dynamic_temp=False, use_kv_cache=True):
 
         device = self.device
         B = initial_energy.shape[0]
 
-        # initial-energy token embedding (t = 0)
         if initial_energy.dim() == 1:
             initial_energy = initial_energy.unsqueeze(1)
-        init_e_embed = self.initial_energy_embedding(initial_energy).unsqueeze(1)  # [B,1,E]
-
-        # caches per layer
-        past_kvs = [None] * len(self.layers)
+        init_e_embed = self.initial_energy_embedding(initial_energy).unsqueeze(1)
 
         is_done = torch.zeros(B, dtype=torch.bool, device=device)
 
-        # position counter (we insert initial-energy at t=0; next is t=1)
-        t = 0
+        # Pre-allocate output tensors
+        idx_buffer = torch.zeros((B, max_seq_len + 1), device=device, dtype=torch.long)
+        if self.digitize_energy:
+            e_buffer = torch.zeros((B, max_seq_len + 1), device=device, dtype=torch.long)
+        else:
+            e_buffer = torch.zeros((B, max_seq_len + 1), device=device, dtype=torch.float32)
 
-        with torch.autocast(
-        device_type="cuda",
-        dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        ):
+        # Pre-allocate KV cache if enabled
+        if use_kv_cache:
+            with torch.autocast(device_type="cuda", dtype=AMP_DTYPE):
+                kv_caches = self._allocate_kv_cache(
+                    batch_size=B,
+                    max_len=max_seq_len + 2,  # +2 for init_energy + buffer
+                    device=device,
+                    dtype=AMP_DTYPE
+                )
+        else:
+            kv_caches = [None] * len(self.layers)
+
+        with torch.autocast(device_type="cuda", dtype=AMP_DTYPE):
             for step in range(max_seq_len):
 
                 if use_kv_cache:
-                    # build current-step embeddings
                     if step == 0:
-                        idx = torch.zeros((B, 1), device=device, dtype=torch.long)  # SOS token
-                        e = torch.zeros((B, 1), device=device, dtype=torch.long)  #  token
-
-                        pos_idx = torch.zeros((B, 1), device=device, dtype=torch.long) # position 0
-                        #mat_embed = self.material_embedding(material_index).view(B, 1, -1)  # (B, 1, E)
-
-                        x_t = self.token_embedding(idx[:, -1:]) + self.pos_embedding(pos_idx)   # [B,1,E]
-                        x_t = torch.cat((init_e_embed, x_t), dim=1)           # [B,2,E]  (initE, SOS)
-
+                        # FIRST STEP: [B, 2, E]
+                        idx_buffer[:, 0] = self.SOS_token
+                        pos_idx = torch.zeros((B, 1), device=device, dtype=torch.long)
+                        
+                        sos_embed = self.token_embedding(idx_buffer[:, 0:1]) + self.pos_embedding(pos_idx)
+                        x_t = torch.cat([init_e_embed, sos_embed], dim=1)
+                        
                         if self.digitize_energy:
-                            e_t = self.energy_embedding(e[:, -1:]) + self.energy_pos_embedding(pos_idx) # [B,1,E]
-                            e_t = torch.cat((init_e_embed, e_t), dim=1)  # [B,2,E]
+                            e_buffer[:, 0] = 0
+                            e_sos = self.energy_embedding(e_buffer[:, 0:1]) + self.energy_pos_embedding(pos_idx)
                         else:
-                            # continuous energy has no SOS; just the conditional token at t=0
-                            e_t = torch.cat((init_e_embed), dim=1) 
+                            e_buffer[:, 0] = 0.0
+                            e_sos = self.energy_embedding(e_buffer[:, 0:1].reshape(-1, 1)).view(B, 1, -1) + \
+                                    self.energy_pos_embedding(pos_idx)
+                        
+                        e_t = torch.cat([init_e_embed, e_sos], dim=1)
+                        
                     else:
-                        # position index for new token
+                        # SUBSEQUENT STEPS: [B, 1, E]
                         pos_idx = torch.full((B, 1), step, device=device, dtype=torch.long)
-                        # token stream
-                        x_t = self.token_embedding(idx[:, -1:]) + self.pos_embedding(pos_idx)
-                        # time/energy stream
+                        
+                        x_t = self.token_embedding(idx_buffer[:, step:step+1]) + self.pos_embedding(pos_idx)
+                        
                         if self.digitize_energy:
-                            e_t = self.energy_embedding(e[:, -1:]) + self.energy_pos_embedding(pos_idx)
+                            e_t = self.energy_embedding(e_buffer[:, step:step+1]) + \
+                                self.energy_pos_embedding(pos_idx)
                         else:
-                            e_t = self.energy_embedding(e[:, -1:].reshape(-1, 1)).view(B, 1, -1) + self.energy_pos_embedding(pos_idx)
+                            e_t = self.energy_embedding(e_buffer[:, step:step+1].reshape(-1, 1)).view(B, 1, -1) + \
+                                self.energy_pos_embedding(pos_idx)
 
-                    # one decode step through the stack w/ caches
-                    h_t, past_kvs = self.forward_decode_step(x_t, e_t, material_index, padding_mask=None, past_kvs=past_kvs)
+                    h_t, kv_caches = self.forward_decode_step(
+                        x_t, e_t, material_index,
+                        padding_mask=None,
+                        kv_caches=kv_caches,
+                        is_first_step=(step == 0)
+                    )
 
-                    # project to logits
-                    if not self.classification and not self.sequence_level:
-                        pixel_logits = self.logits_head(h_t)[:, -1, :] / temperature
-                        if self.digitize_energy:
-                            time_logits = self.energy_head(h_t)[:, -1, :] / temperature
-                        else:
-                            time_val = self.energy_head(h_t)[:, -1]  # regression
+                    pixel_logits = self.logits_head(h_t)[:, -1, :] / temperature
+                    if self.digitize_energy:
+                        time_logits = self.energy_head(h_t)[:, -1, :] / temperature
+                    else:
+                        time_val = self.energy_head(h_t)[:, -1]
 
                 else:
-                    # -------- NO-CACHE path: recompute full prefix each step --------
-                    # Call the usual forward() with the *entire* prefix (idx, e).
-                    # forward() will prepend initial-energy internally and apply masks.
-                    idx = idx if step > 0 else torch.zeros((B, 1), device=device, dtype=torch.long)  # empty at step=0
-                    e = e if step > 0 else torch.zeros((B, 1), device=device, dtype=torch.long)      # empty at step=0
-                    pixel_all, e_out_all = self.forward(idx, e, initial_energy, material_index, padding_mask=None)
+                    # NO-CACHE path
+                    if step == 0:
+                        current_idx = torch.full((B, 1), self.SOS_token, device=device, dtype=torch.long)
+                        if self.digitize_energy:
+                            current_e = torch.zeros((B, 1), device=device, dtype=torch.long)
+                        else:
+                            current_e = torch.zeros((B, 1), device=device, dtype=torch.float32)
+                    else:
+                        current_idx = idx_buffer[:, :step+1].contiguous()
+                        current_e = e_buffer[:, :step+1].contiguous()
+                    
+                    pixel_all, e_out_all = self.forward(current_idx, current_e, initial_energy, material_index, padding_mask=None)
 
-                    # take last position logits/values
                     pixel_logits = pixel_all[:, -1, :] / temperature
                     if self.digitize_energy:
                         time_logits = e_out_all[:, -1, :] / temperature
                     else:
                         time_val = e_out_all[:, -1]
 
-                # sample pixel token
+                # Sample tokens
                 if method == "Default":
                     probs = F.softmax(pixel_logits, dim=-1)
                     idx_next = torch.multinomial(probs, num_samples=1)
@@ -818,18 +903,22 @@ class ECAL_GPT(nn.Module):
                 elif method == "Min_p":
                     idx_next = self.__min_p(pixel_logits)
 
-                # sample time token/value
                 if self.digitize_energy:
                     probs_t = F.softmax(time_logits, dim=-1, dtype=torch.float32)
-                    e_next = torch.multinomial(probs_t, num_samples=1) if method=="Default" else \
-                            (self.__topK(time_logits, topK) if method=="TopK" else
-                            self.__nucleus(time_logits, nucleus_p) if method=="Nucleus" else
-                            torch.argmax(time_logits, dim=-1, keepdim=True) if method=="Greedy" else
-                            self.__min_p(time_logits))
+                    if method == "Default":
+                        e_next = torch.multinomial(probs_t, num_samples=1)
+                    elif method == "TopK":
+                        e_next = self.__topK(time_logits, topK)
+                    elif method == "Nucleus":
+                        e_next = self.__nucleus(time_logits, nucleus_p)
+                    elif method == "Greedy":
+                        e_next = torch.argmax(time_logits, dim=-1, keepdim=True)
+                    else:
+                        e_next = self.__min_p(time_logits)
                 else:
                     e_next = time_val.unsqueeze(1)
 
-                # EOS handling: one EOS, then PAD afterwards
+                # EOS handling
                 if self.digitize_energy:
                     newly_done = (e_next.squeeze(1) == self.EOS_energy_token) | (idx_next.squeeze(1) == self.EOS_token)
                 else:
@@ -839,56 +928,129 @@ class ECAL_GPT(nn.Module):
                 eos_mask = newly_done
                 is_done |= newly_done
 
-                idx_app = idx_next.clone()
-                idx_app[eos_mask] = self.EOS_token
-                idx_app[pad_mask] = self.pad_token
+                # Store tokens
+                idx_store = idx_next.squeeze(1).clone()
+                idx_store[eos_mask] = self.EOS_token
+                idx_store[pad_mask] = self.pad_token
+                idx_buffer[:, step + 1] = idx_store
 
                 if self.digitize_energy:
-                    e_app = e_next.clone()
-                    e_app[eos_mask] = self.EOS_energy_token
-                    e_app[pad_mask] = self.energy_pad_token
+                    e_store = e_next.squeeze(1).clone()
+                    e_store[eos_mask] = self.EOS_energy_token
+                    e_store[pad_mask] = self.energy_pad_token
+                    e_buffer[:, step + 1] = e_store
                 else:
-                    # carry last value for padded steps, or set to 0 if you prefer
-                    e_app = e_next.clone()
-                    e_app[pad_mask] = e[:, -1:][pad_mask]
+                    e_store = e_next.squeeze(1).clone()
+                    if step > 0:
+                        e_store[pad_mask] = e_buffer[:, step][pad_mask]
+                    e_buffer[:, step + 1] = e_store
 
-                idx = torch.cat([idx, idx_app], dim=1)
-                e   = torch.cat([e,   e_app], dim=1)
-
-                t += 1
                 if torch.all(is_done):
-                    break
+                    actual_len = step + 2
+                    return idx_buffer[:, :actual_len].contiguous(), e_buffer[:, :actual_len].contiguous()
 
-        return idx, e
+        return idx_buffer, e_buffer
 
     def forward_decode_step(self, x_t, e_t, material_index,
-                            padding_mask=None, past_kvs=None):
+                            padding_mask=None, kv_caches=None, is_first_step=False):
         """
         Args:
-            x_t: [B,2,E]  newest *space* token embedding (token + pos)
-            e_t: [B,2,E]  newest *time*  token embedding (energy + pos)
-            past_kvs: list matching self.layers. Each entry is either:
-                    - for CA layer: Tuple(K,V) over x-stream
-                    - for MHSA layers: Tuple(K,V)
-                    or None
+            x_t: [B, T_new, E] where T_new=2 on first step, 1 after
+            e_t: [B, T_new, E] where T_new=2 on first step, 1 after
+            kv_caches: List of cache dicts, one per layer
+            is_first_step: True only on step 0
+        
         Returns:
-            h_t: [B,1,E]  newest hidden
-            new_past_kvs: list of updated caches
+            h_t: [B, 1, E] - output for newest position only
+            updated_caches: List of updated cache dicts
         """
-        if past_kvs is None:
-            past_kvs = [None] * len(self.layers)
+        if kv_caches is None:
+            kv_caches = [None] * len(self.layers)
 
         x = x_t
-        new_past = []
-        for layer, pkv in zip(self.layers, past_kvs):
+        e = e_t
+        new_caches = []
+        
+        for i, (layer, cache) in enumerate(zip(self.layers, kv_caches)):
             if isinstance(layer, CATransformerBlock):
-                x, kv, _lb = layer(x, e_t, material_index, padding_mask=padding_mask, classification=self.classification, past_kv=pkv)
+                x, updated_cache, _lb = layer(
+                    x, e, material_index,
+                    padding_mask=padding_mask,
+                    classification=self.classification,
+                    past_kv=cache
+                )
+                new_caches.append(updated_cache)
             else:
-                x, kv, _lb = layer(x, material_index, padding_mask=padding_mask, classification=self.classification, past_kv=pkv)
-            new_past.append(kv)
+                x, updated_cache, _lb = layer(
+                    x, material_index,
+                    padding_mask=padding_mask,
+                    classification=self.classification,
+                    past_kv=cache
+                )
+                new_caches.append(updated_cache)
 
         x = self.LN(x)
-        return x, new_past
+        
+        # Ensure output is [B, 1, E]
+        x = x[:, -1:, :]
+        
+        return x, new_caches
+
+    @torch.no_grad()
+    def generate_PDF(self, kinematics, unscaled_k, PID=None, numPhotons=2e5, max_seq_len: int = 250,
+                 context_len=None, temperature: float = 1.05, method="Nucleus", topK=100,
+                 nucleus_p=0.995, dynamic_temp=False, add_dark_noise=False):
+
+        assert kinematics is not None
+
+        batch_size = kinematics.shape[0]
+        kbar = pkbar.Kbar(target=numPhotons, width=20, always_stateful=False)
+
+        torch.cuda.empty_cache()
+        tracks = []
+        n_total = 0
+
+        if PID == "Pion" and self.use_MoE:
+            class_label = torch.zeros((batch_size,), dtype=torch.float32, device=kinematics.device)
+        elif PID == "Kaon" and self.use_MoE:
+            class_label = torch.ones((batch_size,), dtype=torch.float32, device=kinematics.device)
+        else:
+            class_label = None
+
+        while n_total < numPhotons:
+
+            with torch.no_grad():
+                track = self.generate(kinematics, unscaled_k, class_label=class_label, method=method, temperature=temperature,
+                                      topK=topK, nucleus_p=nucleus_p, dynamic_temp=dynamic_temp, add_dark_noise=add_dark_noise)
+
+            tracks += track
+            n_generated = self.__count_photons(track)
+            n_total += n_generated
+
+            kbar.add(n_generated)
+
+        torch.cuda.empty_cache()
+
+
+        xs, ys, times = [], [], []
+
+        for track_ in tracks:
+            xs.append(track_['x'])
+            ys.append(track_['y'])
+            times.append(track_['leadTime'])
+
+        xs = np.concatenate(xs)[:numPhotons]
+        ys = np.concatenate(ys)[:numPhotons]
+        times = np.concatenate(times)[:numPhotons]
+        return {"x": xs, "y": ys, "leadTime": times}
+
+    def __count_photons(self, tracks):
+        counter = 0
+        for track in tracks:
+            counter += track["NHits"]
+
+        return counter
+
 
     @torch.no_grad()
     def generate_PDF(self, kinematics, unscaled_k, PID=None, numPhotons=2e5, max_seq_len: int = 250,
