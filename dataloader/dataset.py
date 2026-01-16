@@ -13,10 +13,10 @@ import torch.distributed as dist
 
 class ECAL_Chunked_Dataset(Dataset):
     def __init__(self, file_list,
-                 max_seq_length=1700,
+                 max_seq_length=2100,
                  energy_digitizer=None,verbose=False,
                  ordering: Literal['energy', 'spatial'] = 'energy',
-                 material_list: list = ["G4_W", "G4_Ta"],
+                 material_list: list = ["G4_W_gamma", "G4_Ta_gamma"],
                  global_stats: dict = {"Initial_Energy_Max": 100.0, "Initial_Energy_Min": 10.0},
                  inference_mode: bool = False
                     ):
@@ -157,7 +157,7 @@ class ECAL_Chunked_Dataset(Dataset):
 
             if len(energy_copy) > self.max_seq_length - 2:
                 energy_copy = energy_copy[:self.max_seq_length - 2]  # Mimick reserving two spaces, apply -1 for SOS/EOS
-                
+
             energy_copy = np.insert(energy_copy, 0, -1.0)  # SOS energy = -1
             energy_copy = np.append(energy_copy, -1.0)  # EOS energy = -1
 

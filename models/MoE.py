@@ -53,7 +53,7 @@ class Router(nn.Module):
 
         weights = F.softmax(routing,dim=-1)
 
-        # Triggered in fine tuning when adding experts
+        # Triggered in fine tuning when adding new classes
         if (self.training and weights.requires_grad and
             self.freeze_old_classes and self.old_num_classes is not None):
             weights.register_hook(self.mask_old_expert_grads)

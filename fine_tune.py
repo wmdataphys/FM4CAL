@@ -31,7 +31,10 @@ import torch.distributed as dist
 warnings.filterwarnings("ignore", message=".*weights_only.*")
 
 
-def create_model(config,fine_tune_path=None,default_material_list=['G4_W','G4_Ta'],material_to_add="G4_Pb"):
+def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma','G4_Ta_gamma'],material_to_add=None,closest_expert=None):
+
+    assert material_to_add is not None, "Material to add for fine-tuning must be specified."
+
     # Model params.
     vocab_size = config['model']['vocab_size']
     energy_vocab = config['model']['energy_vocab']
@@ -73,7 +76,7 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W','G4_Ta
         net.load_state_dict(state_dict,strict=False)
 
 
-    net.extend_materials(materials_list + [material_to_add])
+    net.extend_model(materials_list + [material_to_add], closest_expert=closest_expert)
 
     return net 
 
@@ -377,7 +380,7 @@ class Trainer:
                 'global_step': self.global_step,
             }, filename)
 
-def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tune_path=None, default_material_list=None, material_to_add=None, run_val=True, write_path=None, checkpoint=None):
+def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tune_path=None, default_material_list=None, material_to_add=None, closest_expert=None, run_val=True, write_path=None, checkpoint=None):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
@@ -398,7 +401,7 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tu
 
     print(f"Rank {rank} - Starting training with {num_files} files, chunk size: {chunk_size}, num epochs: {num_epochs}")
 
-    model = create_model(config, fine_tune_path=fine_tune_path, default_material_list=default_material_list, material_to_add=material_to_add)
+    model = create_model(config, fine_tune_path=fine_tune_path, default_material_list=default_material_list, material_to_add=material_to_add, closest_expert=closest_expert)
     trainer = Trainer(config, rank, world_size, model,default_material_list=default_material_list,material_to_add=material_to_add)
 
     if checkpoint is not None:
@@ -459,7 +462,7 @@ def read_text(file_path):
     except FileNotFoundError:
         raise ValueError(f"Error: The file '{file_path}' was not found.")
 
-def main(config,default_material_list=["G4_W","G4_Ta"],fine_tune_path=None, material_to_add="G4_Pb"):
+def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_path=None, material_to_add=None, closest_expert=None):
     # Setup random seed
     torch.manual_seed(config['seed'])
     np.random.seed(config['seed'])
@@ -489,19 +492,9 @@ def main(config,default_material_list=["G4_W","G4_Ta"],fine_tune_path=None, mate
     print("Adding material for fine-tuning: ", material_to_add)
 
 
-    if "Pb" in material_to_add:
-        print("Adding Pb files to training and validation sets.")
-        train_files += read_text(config['dataset']['training']['Pb_train_files'])
-        val_files += read_text(config['dataset']['validation']['Pb_val_files'])
-    elif "W" in material_to_add:
-        print("Adding W files to training and validation sets.")
-        train_files += read_text(config['dataset']['training']['W_train_files'])
-        val_files += read_text(config['dataset']['validation']['W_val_files'])
-    elif "Ta" in material_to_add:
-        print("Adding Ta files to training and validation sets.")
-        train_files += read_text(config['dataset']['training']['Ta_train_files'])
-        val_files += read_text(config['dataset']['validation']['Ta_val_files'])
-    
+    train_files += read_text(config['dataset']['training'][material_to_add + '_train_files'])
+    val_files += read_text(config['dataset']['validation'][material_to_add + '_val_files'])
+
 
     random.shuffle(train_files)
     random.shuffle(val_files)
@@ -513,21 +506,24 @@ def main(config,default_material_list=["G4_W","G4_Ta"],fine_tune_path=None, mate
                write_path=write_path,
                fine_tune_path=fine_tune_path,
                default_material_list=default_material_list,
-               material_to_add=material_to_add)
+               material_to_add=material_to_add,
+               closest_expert=closest_expert)
 
 if __name__=='__main__':
     # PARSE THE ARGS
     parser = argparse.ArgumentParser(description='Material based fine tuning.')
     parser.add_argument('-c', '--config', default='config.json',type=str,
                         help='Path to the config file (default: config.json)')
-    parser.add_argument('-m', '--default_material_list', nargs='+', default=["G4_W","G4_Ta"],
-                        help='List of materials to include in training (default: ["G4_W","G4_Ta"])')
-    parser.add_argument('--material_to_add', type=str, default="G4_Pb",
-                        help='Material to add for fine-tuning (e.g., "G4_Pb")')                    
+    parser.add_argument('-m', '--default_material_list', nargs='+', default=["G4_W_gamma","G4_Ta_gamma"],
+                        help='List of materials to include in training (default: ["G4_W_gamma","G4_Ta_gamma"])')
+    parser.add_argument('--material_to_add', type=str, default="G4_Pb_gamma",
+                        help='Material to add for fine-tuning (e.g., "G4_Pb_gamma")')                    
     parser.add_argument('--fine_tune_path', type=str, default=None,
                         help='Path to the pre-trained model checkpoint for fine-tuning')
+    parser.add_argument('--closest_expert', type=str, default=None,
+                        help='Closest expert material to initialize new expert from (e.g., "G4_Ta_gamma")')
     args = parser.parse_args()
 
     config = json.load(open(args.config))
 
-    main(config,args.default_material_list,args.fine_tune_path,args.material_to_add)
+    main(config,args.default_material_list,args.fine_tune_path,args.material_to_add,args.closest_expert)

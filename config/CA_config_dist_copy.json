@@ -3,7 +3,7 @@
   "seed": 42,
   "digitize_energy": true,
   "use_amp": true,
-  "material_list": ["G4_W", "G4_Ta"],
+  "material_list": ["G4_W_gamma", "G4_Ta_gamma"],
   "output": {
     "dir": "/sciclone/data10/jgiroux/ECAL_Cole/ECAL_Models"
   },
@@ -11,19 +11,28 @@
     "tracks_per_file": 10000,
     "base_dir":"/sciclone/data10/jgiroux/ECAL_Cole/ECALSim/ILDConfig/StandardConfig/production/simulation/processed/small_model_files",
     "training": {
-      "Pb_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/Pb_Files_train.txt",
-      "W_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/W_Files_train.txt",
-      "Ta_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/Ta_Files_train.txt"
+      "G4_Pb_gamma_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/Pb_Files_train.txt",
+      "G4_W_gamma_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/W_Files_train.txt",
+      "G4_Ta_gamma_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/Ta_Files_train.txt",
+      "G4_Pb_electron_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/Pb_Electron_Files_train.txt",
+      "G4_W_electron_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/W_Electron_Files_train.txt",
+      "G4_Ta_electron_train_files": "/sciclone/data10/jgiroux/ECAL_Cole/Ta_Electron_Files_train.txt"
     },
     "validation": {
-      "Pb_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/Pb_Files_val.txt",
-      "W_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/W_Files_val.txt",
-      "Ta_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/Ta_Files_val.txt"
+      "G4_Pb_gamma_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/Pb_Files_val.txt",
+      "G4_W_gamma_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/W_Files_val.txt",
+      "G4_Ta_gamma_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/Ta_Files_val.txt",
+      "G4_Pb_electron_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/Pb_Electron_Files_val.txt",
+      "G4_W_electron_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/W_Electron_Files_val.txt",
+      "G4_Ta_electron_val_files": "/sciclone/data10/jgiroux/ECAL_Cole/Ta_Electron_Files_val.txt"
     },
     "testing": {
-      "Pb_test_files": "data/Pb_Files_test.txt",
-      "W_test_files": "data/W_Files_test.txt",
-      "Ta_test_files": "data/Ta_Files_test.txt"
+      "G4_Pb_gamma_test_files": "data/1MillSim/Pb_Files_test.txt",
+      "G4_W_gamma_test_files": "data/1MillSim/W_Files_test.txt",
+      "G4_Ta_gamma_test_files": "data/1MillSim/Ta_Files_test.txt",
+      "G4_Pb_electron_test_files": "data/1MillSim/Pb_Electron_Files_test.txt",
+      "G4_W_electron_test_files": "data/1MillSim/W_Electron_Files_test.txt",
+      "G4_Ta_electron_test_files": "data/1MillSim/Ta_Electron_Files_test.txt"
     },
     "in_memory": "in_memory"
   },
@@ -43,7 +52,7 @@
     "hidden_units": 128,
     "mlp_scale": 2,
     "drop_rates": [0.0, 0.0, 0.0],
-    "max_seq_length": 1700,
+    "max_seq_length": 2100,
     "use_MoE": 1
   },
   "stats": {
@@ -88,11 +97,12 @@
         }
   },
   "Inference": {
-    "model_path": "Trained_Models/FullScaleModel_W_Ta_10MEvents_35MeVTokenMax___Dec-31-2025/Epoch00_loss_9.676823.pth",
+    "model_path": "Trained_Models/1MillSample_35MeVTokens_MultiStepLR_2100MSL___Jan-14-2026/Epoch02_loss_9.748074.pth",
+    "model_path_": "Trained_Models/FullScaleModel_W_Ta_10MEvents_35MeVTokenMax_LRMultiStep_RESUME___Jan-09-2026/Epoch02_loss_9.655792.pth",
     "model_path_": "Trained_Models/FineTuning_W_Ta_with_Pb_V1___Dec-26-2025/Epoch07_loss_9.960306.pth",
     "model_path_256": "Trained_Models/25MeVTokens_256Embed_NoMatEmbedding_EnergyOrder___Dec-18-2025/Epoch16_loss_9.931702.pth",
     "model_path_384": "Trained_Models/25MeVTokens_384Embed_NoMatEmbedding_EnergyOrder___Dec-19-2025/Epoch07_loss_9.914091.pth",
-    "output_file": "FullScaleModel_Ta_W_Epoch1.h5",
+    "output_file": "TestNewModel_2100MSL_Epoch02.h5",
     "batch_size": 70,
     "num_workers": 0,
     "initial_energy_min": 10.0,

@@ -202,7 +202,7 @@ class CATransformerBlock(nn.Module):
     def forward(self,
                 x,
                 e_embed,
-                class_label,
+                material_index,
                 padding_mask=None,
                 need_weights=False,
                 classification=False,
@@ -231,7 +231,7 @@ class CATransformerBlock(nn.Module):
         x = x + attn_out
 
         if self.use_MoE:
-            res, load_balance = self.FF(self.LN2(x), class_label, padding_mask=padding_mask)
+            res, load_balance = self.FF(self.LN2(x), material_index, padding_mask=padding_mask)
             x = x + res
         else:
             x = x + self.FF(self.LN2(x))
@@ -348,7 +348,7 @@ class TransformerBlock(nn.Module):
 
     def forward(self,
                 x,
-                class_label,
+                material_index,
                 padding_mask=None,
                 need_weights=False,
                 classification=False,
@@ -375,7 +375,7 @@ class TransformerBlock(nn.Module):
         x = x + attn_out
 
         if self.use_MoE:
-            res, load_balance = self.FF(self.LN2(x), class_label, padding_mask=padding_mask)
+            res, load_balance = self.FF(self.LN2(x), material_index, padding_mask=padding_mask)
             x = x + res
         else:
             x = x + self.FF(self.LN2(x))
@@ -399,7 +399,7 @@ class ECAL_GPT(nn.Module):
                 detokenize_func=None,
                 classification=False,
                 sequence_level=False,
-                use_MoE=False, num_experts: int = 2, material_list: list  = ["G4_W", "G4_Ta"],
+                use_MoE=False, num_experts: int = 2, material_list: list  = ["G4_W_gamma", "G4_Ta_gamma"],
                 device='cuda',
                 grid_shape=None):
         super().__init__()
@@ -411,10 +411,11 @@ class ECAL_GPT(nn.Module):
         assert not (self.sequence_level and self.use_MoE), "MoE must be off in sequence-level mode"
         self.material_list = material_list
         self.num_experts = num_experts
-        self.num_classes = len(self.material_list)
+        self.num_classes = len(self.material_list) 
+
         if self.use_MoE:
             print(f"Using Mixture of Experts for materials: {self.material_list}.")
-            print("Fine tuning will expand experts and embedding tables.")
+            print("Fine tuning will expand experts.")
         else:
             print("Using traditional FFN.")
 
@@ -505,16 +506,24 @@ class ECAL_GPT(nn.Module):
         self.EOS_energy_token = energy_vocab - 2  
         self.energy_pad_token = energy_vocab - 1  
 
-    def extend_materials(self, new_material_list):
-        # Extend model to an additional material by adding experts and updating the router
+    def extend_model(self, new_material_list,closest_expert=None):
+        # Extend model to an additional material/particle combo by adding experts and updating the router
+        # This is done for a specific particle type e.g., G4_W_gamma
         # Assumes experts per class is constant 
         # See fine_tune.py for usage during fine-tuning; assumes loading of N-1 expert model.
         # Eventually want to comment out print statements - annoying in multi GPU training
         if not self.use_MoE:
             raise ValueError("Model is not using MoE; cannot extend materials.")
 
+        if closest_expert is None:
+            print("No closest expert specified; using last expert for new material/particle initialization.")
+
         current_num_classes = len(self.material_list)
         new_num_classes = len(new_material_list)
+
+        if new_num_classes != current_num_classes + 1:
+            print("Can only add one new material/particle at a time currently.")
+            exit(1)
         
         if new_num_classes <= current_num_classes:
             print("No new materials to add. Something is likely wrong.")
@@ -524,10 +533,12 @@ class ECAL_GPT(nn.Module):
         experts_per_class = self.num_experts // current_num_classes
         new_num_experts = new_num_classes * experts_per_class
 
+        old_material_list = self.material_list.copy()
+
         print(f"Extending from {self.material_list} to {new_material_list}")
         print(f"Current: {current_num_classes} classes * {experts_per_class} experts/class = {self.num_experts} total")
         print(f"New:     {new_num_classes} classes * {experts_per_class} experts/class = {new_num_experts} total")
-        
+
         self.material_list = new_material_list
         self.num_classes = new_num_classes
         self.num_experts = new_num_experts
@@ -551,25 +562,28 @@ class ECAL_GPT(nn.Module):
                     device=self.device
                 )
                 
-                # Copy old router weights and initialize new class outputs
+                # Router weights
                 with torch.no_grad():
                     new_router.router.weight.data[:current_num_experts, :] = old_moe.router.router.weight.data
                     new_router.router.bias.data[:current_num_experts] = old_moe.router.router.bias.data
                     
-                    # Initialize new class expert outputs by copying last expert's weights for now? probably perturb it in the future
+                    # Initialize new class expert outputs by copying the closest weights for now? probably perturb it in the future
+                    # i.e., if we have G4_W_gamma and G4_Ta_gamma, when adding G4_Pb_gamma, copy from G4_Ta_gamma
                     for i in range(current_num_experts, new_num_experts):
-                        copy_from_idx = current_num_experts - 1  # last old expert
+                        if closest_expert is None:
+                            copy_from_idx = current_num_experts - 1  # last old expert
+                        else:
+                            copy_from_idx = old_material_list.index(closest_expert) * experts_per_class + (i % experts_per_class)
+    
                         new_router.router.weight.data[i, :] = old_moe.router.router.weight.data[copy_from_idx, :]
                         new_router.router.bias.data[i] = old_moe.router.router.bias.data[copy_from_idx]
                 
-                # Add new experts (experts_per_class experts for the new class)
                 num_new_experts = new_num_experts - current_num_experts
                 for i in range(num_new_experts):
                     old_moe.experts.append(
                         Expert(old_moe.embed_dim, old_moe.mlp_scale, old_moe.drop_rate)
                     )
                 
-                # Replace router and update MoE attributes
                 old_moe.router = new_router
                 old_moe.num_experts = new_num_experts
                 old_moe.num_classes = new_num_classes
@@ -578,11 +592,6 @@ class ECAL_GPT(nn.Module):
 
 
     def embed_space_tokens(self, idx, pos_idx):
-        """
-        idx : [B, T] space token ids
-        pos_idx : [B, T] position ids
-        returns: [B, T, E] embedded tokens with positional and (if applicable) 3D embeddings added
-        """
         tok_emb = self.token_embedding(idx)
         pos_emb = self.pos_embedding(pos_idx)
 
@@ -601,7 +610,7 @@ class ECAL_GPT(nn.Module):
 
         return tok_emb + pos_emb + x_emb + y_emb + z_emb
 
-    def forward(self, x, e, initial_energy, material_index, padding_mask=None):
+    def forward(self, x, e, initial_energy, material_index,padding_mask=None):
         seq_len = x.shape[1]
         batch_size = x.shape[0]
         pos = torch.arange(0, seq_len, dtype=torch.long, device=x.device).unsqueeze(0)
@@ -724,7 +733,7 @@ class ECAL_GPT(nn.Module):
         return temperature
 
     @torch.inference_mode()
-    def generate(self, initial_energy, material_index, max_seq_len=1700,
+    def generate(self, initial_energy, material_index, max_seq_len=2100,
                 context_len=None, temperature: float = 1.0, method="Default",
                 topK=100, nucleus_p=0.98, dynamic_temp=False, use_kv_cache=False):
 
@@ -848,7 +857,7 @@ class ECAL_GPT(nn.Module):
                     e_app[eos_mask] = self.EOS_energy_token
                     e_app[pad_mask] = self.energy_pad_token
                 else:
-                    # carry last value for padded steps, or set to 0 if you prefer
+                    # carry last value for padded steps
                     e_app = e_next.clone()
                     e_app[pad_mask] = e[:, -1:][pad_mask]
 
@@ -890,57 +899,3 @@ class ECAL_GPT(nn.Module):
         x = self.LN(x)
         return x, new_past
 
-    @torch.no_grad()
-    def generate_PDF(self, kinematics, unscaled_k, PID=None, numPhotons=2e5, max_seq_len: int = 250,
-                 context_len=None, temperature: float = 1.05, method="Nucleus", topK=100,
-                 nucleus_p=0.995, dynamic_temp=False, add_dark_noise=False):
-
-        assert kinematics is not None
-
-        batch_size = kinematics.shape[0]
-        kbar = pkbar.Kbar(target=numPhotons, width=20, always_stateful=False)
-
-        torch.cuda.empty_cache()
-        tracks = []
-        n_total = 0
-
-        if PID == "Pion" and self.use_MoE:
-            class_label = torch.zeros((batch_size,), dtype=torch.float32, device=kinematics.device)
-        elif PID == "Kaon" and self.use_MoE:
-            class_label = torch.ones((batch_size,), dtype=torch.float32, device=kinematics.device)
-        else:
-            class_label = None
-
-        while n_total < numPhotons:
-
-            with torch.no_grad():
-                track = self.generate(kinematics, unscaled_k, class_label=class_label, method=method, temperature=temperature,
-                                      topK=topK, nucleus_p=nucleus_p, dynamic_temp=dynamic_temp, add_dark_noise=add_dark_noise)
-
-            tracks += track
-            n_generated = self.__count_photons(track)
-            n_total += n_generated
-
-            kbar.add(n_generated)
-
-        torch.cuda.empty_cache()
-
-
-        xs, ys, times = [], [], []
-
-        for track_ in tracks:
-            xs.append(track_['x'])
-            ys.append(track_['y'])
-            times.append(track_['leadTime'])
-
-        xs = np.concatenate(xs)[:numPhotons]
-        ys = np.concatenate(ys)[:numPhotons]
-        times = np.concatenate(times)[:numPhotons]
-        return {"x": xs, "y": ys, "leadTime": times}
-
-    def __count_photons(self, tracks):
-        counter = 0
-        for track in tracks:
-            counter += track["NHits"]
-
-        return counter
