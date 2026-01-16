@@ -53,3 +53,16 @@ notebook/
 .ipython/
 .local/
 .cache/
+
+# --- Generated model outputs / artifacts ---
+ECALGPT_generated/
+val/
+*.pth
+
+# --- Local scripts & data ---
+init_e_collect.py
+initial_energies.json
+initial_energies.npy
+
+# --- Profiling / traces ---
+profile_trace_*.json
