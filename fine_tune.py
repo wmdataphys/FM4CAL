@@ -35,6 +35,10 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
 
     assert material_to_add is not None, "Material to add for fine-tuning must be specified."
 
+def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma','G4_Ta_gamma'],material_to_add=None,closest_expert=None):
+
+    assert material_to_add is not None, "Material to add for fine-tuning must be specified."
+
     # Model params.
     vocab_size = config['model']['vocab_size']
     energy_vocab = config['model']['energy_vocab']
