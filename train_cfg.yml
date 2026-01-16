@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: ecal-tungsten-tantalum
+  name: ecal-small-ta-w
   namespace: ai4phys
 spec:
   restartPolicy: Never
@@ -27,7 +27,7 @@ spec:
           export OMP_NUM_THREADS=2
           eval "$(conda shell.bash hook)"
           conda activate /sciclone/home/jgiroux/.conda/envs/torch_linux
-          torchrun --nproc-per-node=2 /sciclone/home/jgiroux/FM4CAL/train_dist.py --config /sciclone/home/jgiroux/FM4CAL/config/CA_config_dist_copy.json > /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/TestNewFiles.txt --material_list "G4_W" "G4_Ta"  2>&1
+          torchrun --nproc-per-node=2 /sciclone/home/jgiroux/FM4CAL/train_dist.py --config /sciclone/home/jgiroux/FM4CAL/config/CA_config_dist_copy.json --material_list "G4_W_gamma" "G4_Ta_gamma" > /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/SmallModel_Wgamma_Tagamma_1MEvents_35MeVTokenMax_LRMultiStep.txt  2>&1
       resources:
         requests:
           cpu: "30"
@@ -40,9 +40,14 @@ spec:
       securityContext:
         runAsUser: 255610
         runAsGroup: 50027
+  tolerations:
+    - key: "node"
+      operator: "Equal"
+      value: aiphys
+      effect: "NoSchedule"
   nodeSelector:
-    kubernetes.io/hostname: gu08.sciclone.wm.edu
-    nvidia.com/gpu.product: "NVIDIA-A40"
+    kubernetes.io/hostname: aiphys-node1.sciclone.wm.edu
+    nvidia.com/gpu.product: "NVIDIA-L40S"
   volumes:
     - name: nsf
       nfs:

@@ -397,7 +397,7 @@ def read_text(file_path):
     except FileNotFoundError:
         raise ValueError(f"Error: The file '{file_path}' was not found.")
 
-def main(config,resume,material_list=["G4_W","G4_Ta"],fine_tune=False):
+def main(config,resume,material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune=False):
     # Setup random seed
     torch.manual_seed(config['seed'])
     np.random.seed(config['seed'])
@@ -424,19 +424,11 @@ def main(config,resume,material_list=["G4_W","G4_Ta"],fine_tune=False):
     val_files = []
 
     for material in material_list:
-        if "Pb" in material:
-            print("Adding Pb files to training and validation sets.")
-            train_files += read_text(config['dataset']['training']['Pb_train_files'])
-            val_files += read_text(config['dataset']['validation']['Pb_val_files'])
-        elif "W" in material:
-            print("Adding W files to training and validation sets.")
-            train_files += read_text(config['dataset']['training']['W_train_files'])
-            val_files += read_text(config['dataset']['validation']['W_val_files'])
-        elif "Ta" in material:
-            print("Adding Ta files to training and validation sets.")
-            train_files += read_text(config['dataset']['training']['Ta_train_files'])
-            val_files += read_text(config['dataset']['validation']['Ta_val_files'])
-    
+        print("Including material in training: ", material)
+        # e.g., material = "G4_W_gamma" -> config['dataset']['training']['G4_W_gamma_train_files']
+        # e.g., material = "G4_W_electron" -> config['dataset']['training']['G4_W_electron_train_files']
+        train_files += read_text(config['dataset']['training'][material + '_train_files'])
+        val_files += read_text(config['dataset']['validation'][material + '_val_files'])
 
     random.shuffle(train_files)
     random.shuffle(val_files)
@@ -457,8 +449,8 @@ if __name__=='__main__':
                         help='Path to the config file (default: config.json)')
     parser.add_argument('-r', '--resume', default=None, type=str,
                         help='Path to the .pth model checkpoint to resume training')
-    parser.add_argument('-m', '--material_list', nargs='+', default=["G4_W","G4_Ta"],
-                        help='List of materials to include in training (default: ["G4_W","G4_Ta"])')
+    parser.add_argument('-m', '--material_list', nargs='+', default=["G4_W_gamma","G4_Ta_gamma"],
+                        help='List of materials to include in training (default: ["G4_W_gamma","G4_Ta_gamma"])')
     args = parser.parse_args()
 
     config = json.load(open(args.config))

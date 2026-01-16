@@ -128,22 +128,17 @@ def main(config,args):
 
     test_files = []
     for material in materials_to_generate:
-        if "Pb" in material:
-            print("Adding Pb files to testing set.")
-            test_files += read_text(config['dataset']['testing']['Pb_test_files'])
-        elif "W" in material:
-            print("Adding W files to testing set.")
-            test_files += read_text(config['dataset']['testing']['W_test_files'])
-        elif "Ta" in material:
-            print("Adding Ta files to testing set.")
-            test_files += read_text(config['dataset']['testing']['Ta_test_files'])
+        # e.g., material = "G4_W_gamma" -> config['dataset']['test']['G4_W_gamma_test_files']
+        # e.g., material = "G4_W_electron" -> config['dataset']['test']['G4_W_electron_test_files']
+        test_files += read_text(config['dataset']['testing'][material + '_test_files'])
 
     global_e_max = config['stats']['global_energy_max']
     global_e_min = config['stats']['global_energy_min']
     stats = {"Initial_Energy_Max": global_e_max, "Initial_Energy_Min": global_e_min}
     
-    #test_files = [test_files[0],test_files[-1]]  
-    # test_files = test_files[:5] + test_files[-5:]  # for quick testing
+    # test_files = [twb,tab,tpb]  # for quick testing
+    test_files = [test_files[0],test_files[1],test_files[-2],test_files[-1]]  
+    #test_files = test_files[:5] + test_files[-5:]  # for quick testing
 
     dataset = ECAL_Chunked_Dataset(test_files,max_seq_length=msl,
                 energy_digitizer=energy_digitizer,verbose=True,
@@ -318,7 +313,6 @@ if __name__ == "__main__":
     parser.add_argument('--use_amp', action='store_true', help='Whether to use automatic mixed precision.')
     parser.add_argument('--num_showers', type=int, default=-1, help='Number of showers to generate for plotting. -1 for all.')
     parser.add_argument('--materials_to_generate', type=str, nargs='+', default=None, help='List of materials to generate showers for. If not set, generates for all materials in config.')
-    #parser.add_argument('--material', type=str, default='G4_W', help='Material to generate showers for [G4_W, G4_Pb, G4_Ta].')
     args = parser.parse_args()
 
     os.makedirs("Generations", exist_ok=True)

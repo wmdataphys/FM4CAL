@@ -27,9 +27,7 @@ spec:
           export OMP_NUM_THREADS=2
           eval "$(conda shell.bash hook)"
           conda activate /sciclone/home/jgiroux/.conda/envs/torch_linux
-          torchrun --nproc-per-node=2 /sciclone/home/jgiroux/FM4CAL/fine_tune.py --config /sciclone/home/jgiroux/FM4CAL/config/CA_config_dist_copy.json \
-          --default_material_list "G4_W" "G4_Ta" --material_to_add "G4_Pb" --fine_tune_path /sciclone/data10/jgiroux/ECAL_Cole/ECAL_Models/25MeVTokens_256Embed_NoMatEmbedding_EnergyOrder___Dec-18-2025/Epoch16_loss_9.931702.pth \
-           > /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/FineTuning_W_Ta_with_Pb_V1.txt  2>&1
+          torchrun --nproc-per-node=2 /sciclone/home/jgiroux/FM4CAL/fine_tune.py --config /sciclone/home/jgiroux/FM4CAL/config/CA_config_dist_copy.json --default_material_list "G4_W_gamma" "G4_Ta_gamma" --material_to_add "G4_Pb_gamma" --closest_expert "G4_Ta_gamma" --fine_tune_path TO_ADD > /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/FineTuning_W_Ta_with_Pb_35MeVTokens_2100MSL.txt  2>&1
       resources:
         requests:
           cpu: "30"
