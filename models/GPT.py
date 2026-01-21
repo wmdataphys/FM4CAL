@@ -1,8 +1,10 @@
 import math
 import numpy as np
 import pkbar
+import copy
 
 from models.MoE import MoE, Router, Expert
+from models.LoRA import LoRA ,Embed_LoRA, Vocab_LoRA, ConditionedAdapter
 
 import torch
 import torch.nn as nn
@@ -20,50 +22,6 @@ torch.set_float32_matmul_precision("high")
 AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
 
-class ResNetBlock(nn.Module):
-    def __init__(self, hidden_units):
-        super().__init__()
-        self.linear1 = nn.Linear(hidden_units, hidden_units)
-        self.linear2 = nn.Linear(hidden_units, hidden_units)
-        self.activation = nn.ReLU()
-
-    def forward(self, x):
-        inputs = x
-        x = self.activation(self.linear1(x))
-        x = self.activation(self.linear2(x) + inputs)
-        return x
-
-    def resnet_subnet(c_in, c_out):
-        layers = [nn.Linear(c_in,hidden_units)]
-
-        # Stack residual blocks
-        for _ in range(num_blocks):
-            layers.append(ResNetBlock(hidden_units))
-
-        layers += [nn.Linear(hidden_units, c_out)]
-        return nn.Sequential(*layers)
-
-
-class TimeRegression(nn.Module):
-    def __init__(self, num_blocks, hidden_units, embed_dim):
-        super().__init__()
-        self.num_blocks = num_blocks
-        self.hidden_units = hidden_units
-        self.embed_dim = embed_dim
-
-        layers = [nn.Linear(self.embed_dim, self.hidden_units)]
-
-        for _ in range(self.num_blocks):
-            layers.append(ResNetBlock(self.hidden_units))
-
-        layers += [nn.Linear(self.hidden_units, 1), nn.ReLU()]
-
-        self.nn = nn.Sequential(*layers)
-
-    def forward(self, x, k=None):
-        return self.nn(x)
-
-
 class FF(nn.Module):
     def __init__(self, embed_dim, mlp_scale: int = 2,
                  drop_rate: float = 0.0):
@@ -75,7 +33,6 @@ class FF(nn.Module):
 
     def forward(self, x):
         return self.nn(x)
-
 
 class CrossAttention(nn.Module):
     def __init__(self,
@@ -102,7 +59,7 @@ class CrossAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, e_embed, attn_mask=None, key_padding_mask=None,
-                need_weights=False, past_kv=None):
+                need_weights=False, past_kv=None, LoRA_module=None):
         """
         x:         [B, T_new, E]
         e_embed:   [B, T_new, E]
@@ -112,6 +69,14 @@ class CrossAttention(nn.Module):
         batch_size, seq_len, embed_dim = x.shape
 
         q, k, v = self.q_proj(e_embed), self.k_proj(x), self.v_proj(x)
+
+        # Apply LoRA to Q,K if available
+        if LoRA_module is not None:
+            IA3_K,IA3_V = LoRA_module.get_IA3_KV()
+            delta_Q, delta_K, delta_V = LoRA_module(x,e_embed=e_embed)  # (B, T_new, E)
+            q = q + delta_Q
+            k = (k + delta_K) * IA3_K
+            v = (v + delta_V) * IA3_V
 
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
@@ -186,7 +151,8 @@ class CATransformerBlock(nn.Module):
                  num_experts: int = 4,
                  num_classes: int = 2,
                  use_MoE: bool = False,
-                 device='cuda'):
+                 device='cuda',
+                 LoRA_module=None):
         super().__init__()
         self.use_MoE = use_MoE
         self.embed_dim = embed_dim
@@ -219,19 +185,13 @@ class CATransformerBlock(nn.Module):
                 padding_mask=None,
                 need_weights=False,
                 classification=False,
-                past_kv=None):
+                past_kv=None, LoRA_module=None):
         B, N_t, t_dim = x.shape
 
         x_norm = self.xN(x)
         e_norm = self.eN(e_embed)
         load_balance = torch.tensor([0.0], dtype=torch.float32, device=x.device)  # place holder for non MoE model return
 
-        # Not used in this model
-        # if not classification:
-        #     
-        #     attn, attn_weights = self.attn(x_norm, e_norm, attn_mask=mask_, key_padding_mask=padding_mask, need_weights=False)
-        # else:
-        #     attn, attn_weights = self.attn(x_norm, e_norm, key_padding_mask=paddig_mask, need_weights=False)
         need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
         mask_ = self.generate_mask(N_t) if need_causal else None
 
@@ -240,8 +200,12 @@ class CATransformerBlock(nn.Module):
                                     e_norm,
                                     key_padding_mask=padding_mask,
                                     attn_mask=mask_,
-                                    past_kv=past_kv)
-        attn_out = self.c_proj(attn_out)
+                                    past_kv=past_kv,
+                                    LoRA_module=LoRA_module)
+
+        delta_proj = LoRA_module.forward_proj(attn_out) if LoRA_module is not None else 0.0
+        attn_out = self.c_proj(attn_out) + delta_proj
+
         x = x + attn_out
 
         if self.use_MoE:
@@ -272,7 +236,7 @@ class MHSA(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, attn_mask=None, key_padding_mask=None,
-                need_weights=False, past_kv=None):
+                need_weights=False, past_kv=None, LoRA_module=None):
         """
         x: [B, T_new, E]
         past_kv: Dict with {'k': cache_k, 'v': cache_v, 'seq_len': int} or None
@@ -281,6 +245,15 @@ class MHSA(nn.Module):
         batch_size, T_new, embed_dim = x.shape
 
         q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+
+        # Apply LoRA to Q,K if available
+        if LoRA_module is not None:
+            IA3_K,IA3_V = LoRA_module.get_IA3_KV()
+            delta_Q, delta_K, delta_V = LoRA_module(x)  # (B, T_new, E)
+            q = q + delta_Q
+            k = (k + delta_K) * IA3_K
+            v = (v + delta_V) * IA3_V
+
 
         k = k.view(batch_size, T_new, self.num_heads, self.head_dim)
         v = v.view(batch_size, T_new, self.num_heads, self.head_dim)
@@ -380,17 +353,11 @@ class TransformerBlock(nn.Module):
                 padding_mask=None,
                 need_weights=False,
                 classification=False,
-                past_kv=None):
+                past_kv=None,
+                LoRA_module=None):
         B, N_t, t_dim = x.shape
         x_norm = self.LN1(x)
         load_balance = torch.tensor([0.0], dtype=torch.float32, device=x.device)  # place holder for non MoE model return
-
-        # Not used in this model
-        # if not classification:
-        #     mask_ = self.generate_mask(N_t)
-        #     attn, attn_weights = self.attn(x_norm, attn_mask=mask_, key_padding_mask=padding_mask, need_weights=need_weights)
-        # else:
-        #     attn, attn_weights = self.attn(x_norm, key_padding_mask=padding_mask, need_weights=need_weights)
 
         need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
         mask_ = self.generate_mask(N_t) if need_causal else None
@@ -401,8 +368,10 @@ class TransformerBlock(nn.Module):
                                 key_padding_mask=padding_mask,
                                 need_weights=need_weights,
                                 attn_mask=mask_,
-                                past_kv=past_kv)
-        attn_out = self.c_proj(attn_out)
+                                past_kv=past_kv, LoRA_module=LoRA_module)
+
+        delta_proj = LoRA_module.forward_proj(attn_out) if LoRA_module is not None else 0.0
+        attn_out = self.c_proj(attn_out) + delta_proj
         x = x + attn_out
 
         if self.use_MoE:
@@ -428,25 +397,35 @@ class ECAL_GPT(nn.Module):
                 space_vocab=27003,
                 drop_rates=[0.0, 0.0, 0.0],
                 detokenize_func=None,
-                classification=False,
-                sequence_level=False,
                 use_MoE=False, num_experts: int = 2, material_list: list  = ["G4_W_gamma", "G4_Ta_gamma"],
+                particle_list: list = ["gamma"], base_model_type: str = "gamma",
                 device='cuda',
-                grid_shape=None):
+                grid_shape=None,
+                LoRA_alpha=64,
+                LoRA_r=32,
+                T_ref=1000.0):
         super().__init__()
-
+        self.embed_dim = embed_dim
+        self.seq_len = seq_len
+        self.attn_heads = attn_heads
+        self.num_blocks = num_blocks  
+        self.mlp_scale = mlp_scale  
+        self.drop_rates = drop_rates
         self.use_MoE = use_MoE
         self.classification = classification
         self.sequence_level = sequence_level
-        assert not (self.classification and self.use_MoE), "MoE must be off in classification mode"
-        assert not (self.sequence_level and self.use_MoE), "MoE must be off in sequence-level mode"
+        self.base_model_type = base_model_type
+        self.LoRA_alpha = LoRA_alpha
+        self.LoRA_r = LoRA_r
+
         self.material_list = material_list
         self.num_experts = num_experts
-        self.num_classes = len(self.material_list) 
-
+        self.num_classes = len(self.material_list)
+        self.particle_list = particle_list
+        
         if self.use_MoE:
             print(f"Using Mixture of Experts for materials: {self.material_list}.")
-            print("Fine tuning will expand experts.")
+            print("Fine tuning will expand experts and/or LoRA modules for particles.")
         else:
             print("Using traditional FFN.")
 
@@ -456,9 +435,15 @@ class ECAL_GPT(nn.Module):
         self.pos_embedding = nn.Embedding(seq_len, embed_dim)
         self.energy_pos_embedding = nn.Embedding(seq_len, embed_dim)
         self.initial_energy_embedding = nn.Linear(1, embed_dim)
+        self.LN = nn.LayerNorm(embed_dim)
+        self.energy_embedding = nn.Embedding(energy_vocab, embed_dim)
+        self.energy_head = nn.Linear(embed_dim, energy_vocab)
+        self.logits_head = nn.Linear(embed_dim, vocab_size)
         print("Not using material embeddings.")
         #self.material_embedding = nn.Embedding(self.num_classes, embed_dim)
         self.device = device
+        self.space_vocab = space_vocab
+        self.energy_vocab = energy_vocab
 
         # Add in 3D positional embeddings if provided
         self.grid_shape = grid_shape
@@ -496,46 +481,73 @@ class ECAL_GPT(nn.Module):
             self.x_embedding = None
             self.y_embedding = None
             self.z_embedding = None
+        
+        self.__init_layers()
 
-        # Can refactor this - fine for now
-        layers_ = [CATransformerBlock(embed_dim,
-                                      attn_heads[0],
-                                      mlp_scale,
-                                      drop_rate=drop_rates[0],
-                                      use_MoE=self.use_MoE,
-                                      num_experts=self.num_experts,
-                                      num_classes=self.num_classes,
-                                      device=self.device)]
-        layers_ += [TransformerBlock(embed_dim,
-                                     attn_heads[i],
-                                     mlp_scale,
-                                     drop_rate=drop_rates[i],
-                                     use_MoE=self.use_MoE,
-                                     num_experts=self.num_experts,
-                                     num_classes=self.num_classes,
-                                     device=self.device) for i in range(1, len(attn_heads))]
-        self.layers = nn.ModuleList(layers_)
-        self.LN = nn.LayerNorm(embed_dim)
-
-        if not self.classification and not self.sequence_level:
-            if self.digitize_energy:  # Multiclass
-                self.energy_embedding = nn.Embedding(energy_vocab, embed_dim)
-                self.energy_head = nn.Linear(embed_dim, energy_vocab)
-            else:  # Regression
-                self.energy_embedding = nn.Linear(1, embed_dim)
-                self.energy_head = TimeRegression(num_blocks, hidden_units, embed_dim)
-
-            self.logits_head = nn.Linear(embed_dim, vocab_size)
-
-        else:
-            raise NotImplementedError("Classification and sequence-level modes are not implemented in this version.")
-
+        if len(self.particle_list) > 1:
+            self.__build_LoRA_modules()
 
         self.SOS_token = 0
         self.EOS_token = space_vocab - 2  
         self.pad_token = space_vocab - 1  
         self.EOS_energy_token = energy_vocab - 2  
-        self.energy_pad_token = energy_vocab - 1  
+        self.energy_pad_token = energy_vocab - 1 
+
+    def __build_LoRA_modules(self,energy_vocab=False):
+        self.embedding_adapter = {}
+        self.particle_lora = {} 
+        self.vocab_LoRA = {}
+        for particle in self.particle_list:
+            if particle == self.base_model_type:
+                # Base particle (e.g., gamma): no LoRA
+                self.particle_lora[particle] = [None] * len(self.attn_heads)
+            else:
+                print(f"Creating LoRA modules for particle type: {particle}. LoRA_r={self.LoRA_r}, LoRA_alpha={self.LoRA_alpha} ")
+                lora_list = nn.ModuleList([
+                    LoRA(self.embed_dim, lora_r=self.LoRA_r, alpha=self.LoRA_alpha, drop_rate=self.drop_rates[0], device=self.device)
+                    for _ in range(len(self.attn_heads))])
+                self.particle_lora[particle] = lora_list
+
+                embedding_adapter_list = nn.ModuleList([
+                    ConditionedAdapter(self.embed_dim) for _ in range(2)])  # 2 embedding modules: token and energy
+                self.embedding_adapter[particle] = embedding_adapter_list
+
+                self.vocab_LoRA[particle] = nn.ModuleList([Vocab_LoRA(vocab_size=self.space_vocab, embed_dim=self.embed_dim, lora_r= self.LoRA_r, alpha=self.LoRA_alpha, drop_rate=self.drop_rates[0], device=self.device),
+                                                          Vocab_LoRA(vocab_size=self.energy_vocab, embed_dim=self.embed_dim, lora_r= self.LoRA_r, alpha=self.LoRA_alpha, drop_rate=self.drop_rates[0], device=self.device)])
+        
+
+        for particle, lora_list in self.particle_lora.items():
+            if isinstance(lora_list, nn.ModuleList):
+                self.add_module(f"particle_lora_{particle}", lora_list)
+
+        for particle, embedding_adapter_list in self.embedding_adapter.items():
+            if isinstance(embedding_adapter_list, nn.ModuleList):
+                self.add_module(f"embedding_adapter_{particle}", embedding_adapter_list)
+        
+        for particle, vocab_lora_module in self.vocab_LoRA.items():
+            if isinstance(vocab_lora_module, nn.ModuleList):
+                self.add_module(f"vocab_lora_{particle}", vocab_lora_module)
+
+
+    def __init_layers(self,):
+        # Can refactor this - fine for now
+        layers_ = [CATransformerBlock(self.embed_dim,
+                                      self.attn_heads[0],
+                                      self.mlp_scale,
+                                      drop_rate=self.drop_rates[0],
+                                      use_MoE=self.use_MoE,
+                                      num_experts=self.num_experts,
+                                      num_classes=self.num_classes,
+                                      device=self.device)]
+        layers_ += [TransformerBlock(self.embed_dim,
+                                     self.attn_heads[i],
+                                     self.mlp_scale,
+                                     drop_rate=self.drop_rates[i],
+                                     use_MoE=self.use_MoE,
+                                     num_experts=self.num_experts,
+                                     num_classes=self.num_classes,
+                                     device=self.device) for i in range(1, len(self.attn_heads))]
+        self.layers = nn.ModuleList(layers_)
 
     def _allocate_kv_cache(self, batch_size, max_len, device, dtype=torch.float16):
         """
@@ -572,12 +584,31 @@ class ECAL_GPT(nn.Module):
         
         return cache_list
 
-    def extend_model(self, new_material_list,closest_expert=None):
+    def extend_model(self, new_material_list,closest_expert=None,particle_type="e-"):
         # Extend model to an additional material/particle combo by adding experts and updating the router
         # This is done for a specific particle type e.g., G4_W_gamma
         # Assumes experts per class is constant 
         # See fine_tune.py for usage during fine-tuning; assumes loading of N-1 expert model.
         # Eventually want to comment out print statements - annoying in multi GPU training
+        self.lora_newly_created = False
+
+        if particle_type not in self.particle_list and particle_type != self.base_model_type:
+            print("Adding new particle type; creating LoRA modules.")
+            self.particle_list.append(particle_type)
+            self.__build_LoRA_modules()
+            self.lora_newly_created = True
+
+        elif particle_type in self.particle_list and particle_type != self.base_model_type:
+            print("Existing particle type; reusing LoRA modules.")
+            # LoRA modules already loaded into model
+            self.lora_newly_created = False
+        elif particle_type == self.base_model_type:
+            print("Base particle type; no LoRA modules added.")
+            self.lora_newly_created = False
+        else:
+            raise ValueError("Unexpected particle type condition.")
+        
+
         if not self.use_MoE:
             raise ValueError("Model is not using MoE; cannot extend materials.")
 
@@ -615,47 +646,33 @@ class ECAL_GPT(nn.Module):
                 current_num_experts = old_moe.num_experts
                 
                 print(f"Layer {layer_idx}: Extending MoE from {current_num_experts} -> {new_num_experts} experts")
-                
-                # Old router was [B,seq,E] -> [B,seq,current_num_experts]
-                # New router will be [B,seq,E] -> [B,seq,new_num_experts]
-                # We will copy old weights in, and freeze current_num_experts weights (i.e., previous models' experts)
-                new_router = Router(
-                    embed_dim=old_moe.embed_dim,
-                    num_experts=new_num_experts,
-                    num_classes=new_num_classes,
-                    freeze_old_classes=True,
-                    old_num_classes=current_num_classes,
-                    device=self.device
-                )
-                
-                # Router weights
-                with torch.no_grad():
-                    new_router.router.weight.data[:current_num_experts, :] = old_moe.router.router.weight.data
-                    new_router.router.bias.data[:current_num_experts] = old_moe.router.router.bias.data
+                new_MoE = MoE(old_moe.embed_dim,
+                              mlp_scale=old_moe.mlp_scale, 
+                              num_experts=new_num_experts,
+                              num_classes=new_num_classes,
+                              drop_rate=old_moe.drop_rate)
+
+                # Copy over existing experts
+                for i in range(current_num_experts):
+                    new_MoE.experts[i] = copy.deepcopy(old_moe.experts[i])
                     
-                    # Initialize new class expert outputs by copying the closest weights for now? probably perturb it in the future
-                    # i.e., if we have G4_W_gamma and G4_Ta_gamma, when adding G4_Pb_gamma, copy from G4_Ta_gamma
-                    for i in range(current_num_experts, new_num_experts):
-                        if closest_expert is None:
-                            copy_from_idx = current_num_experts - 1  # last old expert
-                        else:
-                            copy_from_idx = old_material_list.index(closest_expert) * experts_per_class + (i % experts_per_class)
-    
-                        new_router.router.weight.data[i, :] = old_moe.router.router.weight.data[copy_from_idx, :]
-                        new_router.router.bias.data[i] = old_moe.router.router.bias.data[copy_from_idx]
-                
-                num_new_experts = new_num_experts - current_num_experts
-                for i in range(num_new_experts):
-                    old_moe.experts.append(
-                        Expert(old_moe.embed_dim, old_moe.mlp_scale, old_moe.drop_rate)
-                    )
-                
-                old_moe.router = new_router
-                old_moe.num_experts = new_num_experts
-                old_moe.num_classes = new_num_classes
+                # Initialize new experts
+                for j in range(current_num_experts, new_num_experts):
+                    if closest_expert is not None:
+                        closest_expert_idx = old_material_list.index(closest_expert) * experts_per_class + (j % experts_per_class)
+                        print(f"Initializing new expert {j} from closest expert {closest_expert}, at index {closest_expert_idx}.")
+                        new_MoE.experts[j] = copy.deepcopy(old_moe.experts[closest_expert_idx])
+                    else:
+                        print(f"Initializing new expert {j} randomly.")
+                        # Random init
+                        new_MoE.experts[j] = copy.deepcopy(old_moe.experts[-1])
+                        for param in new_MoE.experts[j].parameters():
+                            if param.requires_grad:
+                                nn.init.normal_(param.data, mean=0.0, std=0.01)
+
+                layer.FF = new_MoE
 
         print(f"Extended to {self.num_experts} experts for materials: {self.material_list}")
-
 
     def embed_space_tokens(self, idx, pos_idx):
         tok_emb = self.token_embedding(idx)
@@ -676,18 +693,19 @@ class ECAL_GPT(nn.Module):
 
         return tok_emb + pos_emb + x_emb + y_emb + z_emb
 
-    def forward(self, x, e, initial_energy, material_index,padding_mask=None):
+    def forward(self, x, e, initial_energy, material_index,padding_mask=None,particle_type="gamma"):
         seq_len = x.shape[1]
         batch_size = x.shape[0]
         pos = torch.arange(0, seq_len, dtype=torch.long, device=x.device).unsqueeze(0)
 
         if not self.digitize_energy:
-            e = e.reshape(-1, 1)  # [batch_size * seq_len, 1]
-            e_embed_flat = self.energy_embedding(e)
-            e_embed = e_embed_flat.view(batch_size, seq_len, e_embed_flat.shape[-1])  # [batch_size, seq_len, embed_dim]
-            e_embed = e_embed + self.energy_pos_embedding(pos) 
+            e_embed = self.energy_embedding(e.view(-1, 1)).view(batch_size, seq_len, -1)
         else:
-            e_embed = self.energy_embedding(e) + self.energy_pos_embedding(pos)
+            e_embed = self.energy_embedding(e)
+
+        e_embed = e_embed + self.energy_pos_embedding(pos)
+
+        e_embed = self.embedding_adapter[particle_type][1](e_embed) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_embed
 
         # Ensure initial_energy has shape (B, 1) before embedding
         if initial_energy.dim() == 1:
@@ -700,7 +718,10 @@ class ECAL_GPT(nn.Module):
         # Embed to (B, embed_dim) then add a time-step dimension -> (B, 1, embed_dim)
         initial_energy_embed = self.initial_energy_embedding(initial_energy).view(batch_size, 1, -1)  # (B, 1, E)
 
-        x = self.token_embedding(x) + self.pos_embedding(pos)  #
+        # Apply adaptations to embeddings if applicable
+        x = self.token_embedding(x) + self.pos_embedding(pos)
+        x = self.embedding_adapter[particle_type][0](x) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else x
+
         e_embed = torch.cat((initial_energy_embed, e_embed), dim=1)  # Make sure to concat initial energy here
         x = torch.cat((initial_energy_embed, x), dim=1)
 
@@ -713,19 +734,30 @@ class ECAL_GPT(nn.Module):
 
         if self.training:
             load_balance = 0.0
-            for layer in self.layers:
+            for i, layer in enumerate(self.layers):
+                lora_mod = None
+                if hasattr(self, 'particle_lora') and particle_type in self.particle_lora:
+                    lora_list = self.particle_lora[particle_type]
+                    if isinstance(lora_list, (list, nn.ModuleList)) and len(lora_list) > 0:
+                        lora_mod = lora_list[i] if lora_list[i] is not None else None
+                
                 if layer.__class__.__name__ == "CATransformerBlock":
-                    x, _kv, load = layer(x, e_embed, material_index, padding_mask=padding_mask, classification=self.classification)
+                    x, _kv, load = layer(x, e_embed, material_index, padding_mask=padding_mask, classification=self.classification,LoRA_module=lora_mod)
                 else:
-                    x, _kv, load = layer(x, material_index, padding_mask=padding_mask, classification=self.classification)
+                    x, _kv, load = layer(x, material_index, padding_mask=padding_mask, classification=self.classification,LoRA_module=lora_mod)
                 load_balance += load
-
         else:
-            for layer in self.layers:
+            for i, layer in enumerate(self.layers):
+                lora_mod = None
+                if hasattr(self, 'particle_lora') and particle_type in self.particle_lora:
+                    lora_list = self.particle_lora[particle_type]
+                    if isinstance(lora_list, (list, nn.ModuleList)) and len(lora_list) > 0:
+                        lora_mod = lora_list[i] if lora_list[i] is not None else None
+            
                 if layer.__class__.__name__ == "CATransformerBlock":
-                    x, _kv, _lb = layer(x, e_embed, material_index, padding_mask=padding_mask, classification=self.classification)
+                    x, _kv, _lb = layer(x, e_embed, material_index, padding_mask=padding_mask, classification=self.classification,LoRA_module=lora_mod)
                 else:
-                    x, _kv, _lb = layer(x, material_index, padding_mask=padding_mask, classification=self.classification)
+                    x, _kv, _lb = layer(x, material_index, padding_mask=padding_mask, classification=self.classification,LoRA_module=lora_mod)
 
         x = self.LN(x)
 
@@ -733,9 +765,14 @@ class ECAL_GPT(nn.Module):
             if not self.digitize_energy:
                 e_out = self.energy_head(x).squeeze(-1)  # direct regression of time
             else:
-                e_out = self.energy_head(x)  # logits over time
+                delta_e = self.vocab_LoRA[particle_type][1](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
+                e_out = self.energy_head(x) + delta_e  # logits over time
 
-            pixel = self.logits_head(x)
+            delta_pixel = self.vocab_LoRA[particle_type][0](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
+            pixel = self.logits_head(x) + delta_pixel
+
+            e_out = self.vocab_LoRA[particle_type][1].apply_product(e_out) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else e_out
+            pixel = self.vocab_LoRA[particle_type][0].apply_product(pixel) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else pixel
 
             if self.training:
                 return pixel, e_out, load_balance
@@ -801,7 +838,7 @@ class ECAL_GPT(nn.Module):
     @torch.inference_mode()
     def generate(self, initial_energy, material_index, max_seq_len=2100,
                 context_len=None, temperature: float = 1.0, method="Default",
-                topK=100, nucleus_p=0.98, dynamic_temp=False, use_kv_cache=True):
+                topK=100, nucleus_p=0.95, dynamic_temp=False, use_kv_cache=True,particle_type="gamma"):
 
         device = self.device
         B = initial_energy.shape[0]
@@ -841,6 +878,9 @@ class ECAL_GPT(nn.Module):
                         pos_idx = torch.zeros((B, 1), device=device, dtype=torch.long)
                         
                         sos_embed = self.token_embedding(idx_buffer[:, 0:1]) + self.pos_embedding(pos_idx)
+                        # Adapter on embeddings if avail
+                        sos_embed = self.embedding_adapter[particle_type][0](sos_embed) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else sos_embed
+                        
                         x_t = torch.cat([init_e_embed, sos_embed], dim=1)
                         
                         if self.digitize_energy:
@@ -851,13 +891,17 @@ class ECAL_GPT(nn.Module):
                             e_sos = self.energy_embedding(e_buffer[:, 0:1].reshape(-1, 1)).view(B, 1, -1) + \
                                     self.energy_pos_embedding(pos_idx)
                         
-                        e_t = torch.cat([init_e_embed, e_sos], dim=1)
+                        # Adapter on embeddings if avail
+                        e_sos = self.embedding_adapter[particle_type][1](e_sos) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_sos
+                        e_t = torch.cat([init_e_embed, e_sos ], dim=1)
                         
                     else:
                         # SUBSEQUENT STEPS: [B, 1, E]
                         pos_idx = torch.full((B, 1), step, device=device, dtype=torch.long)
                         
                         x_t = self.token_embedding(idx_buffer[:, step:step+1]) + self.pos_embedding(pos_idx)
+                        # Adapter on embeddings if avail
+                        x_t = self.embedding_adapter[particle_type][0](x_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else x_t
                         
                         if self.digitize_energy:
                             e_t = self.energy_embedding(e_buffer[:, step:step+1]) + \
@@ -866,18 +910,27 @@ class ECAL_GPT(nn.Module):
                             e_t = self.energy_embedding(e_buffer[:, step:step+1].reshape(-1, 1)).view(B, 1, -1) + \
                                 self.energy_pos_embedding(pos_idx)
 
+                        # Adapter on embeddings if avail
+                        e_t = self.embedding_adapter[particle_type][1](e_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_t
+
                     h_t, kv_caches = self.forward_decode_step(
                         x_t, e_t, material_index,
                         padding_mask=None,
                         kv_caches=kv_caches,
-                        is_first_step=(step == 0)
+                        is_first_step=(step == 0), particle_type=particle_type
                     )
 
-                    pixel_logits = self.logits_head(h_t)[:, -1, :] / temperature
+                    delta_pixel = self.vocab_LoRA[particle_type][0](h_t) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0    
+                    pixel_logits = (self.logits_head(h_t)[:, -1, :] + delta_pixel[:, -1, :]) 
+                    pixel_logits = self.vocab_LoRA[particle_type][0].apply_product(pixel_logits) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else pixel_logits
+                    pixel_logits = pixel_logits.squeeze(0) / temperature
                     if self.digitize_energy:
-                        time_logits = self.energy_head(h_t)[:, -1, :] / temperature
+                        delta_e = self.vocab_LoRA[particle_type][1](h_t) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
+                        energy_logits = (self.energy_head(h_t)[:, -1, :] + delta_e[:, -1, :])
+                        energy_logits = self.vocab_LoRA[particle_type][1].apply_product(energy_logits) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else energy_logits
+                        energy_logits = energy_logits.squeeze(0) / temperature
                     else:
-                        time_val = self.energy_head(h_t)[:, -1]
+                        energy_val = self.energy_head(h_t)[:, -1]
 
                 else:
                     # NO-CACHE path
@@ -890,14 +943,14 @@ class ECAL_GPT(nn.Module):
                     else:
                         current_idx = idx_buffer[:, :step+1].contiguous()
                         current_e = e_buffer[:, :step+1].contiguous()
-                    
-                    pixel_all, e_out_all = self.forward(current_idx, current_e, initial_energy, material_index, padding_mask=None)
+
+                    pixel_all, e_out_all = self.forward(current_idx, current_e, initial_energy, material_index, padding_mask=None, particle_type=particle_type)
 
                     pixel_logits = pixel_all[:, -1, :] / temperature
                     if self.digitize_energy:
-                        time_logits = e_out_all[:, -1, :] / temperature
+                        energy_logits = e_out_all[:, -1, :] / temperature
                     else:
-                        time_val = e_out_all[:, -1]
+                        energy_val = e_out_all[:, -1]
 
                 # Sample tokens
                 if method == "Default":
@@ -913,19 +966,19 @@ class ECAL_GPT(nn.Module):
                     idx_next = self.__min_p(pixel_logits)
 
                 if self.digitize_energy:
-                    probs_t = F.softmax(time_logits, dim=-1, dtype=torch.float32)
+                    probs_t = F.softmax(energy_logits, dim=-1, dtype=torch.float32)
                     if method == "Default":
                         e_next = torch.multinomial(probs_t, num_samples=1)
                     elif method == "TopK":
-                        e_next = self.__topK(time_logits, topK)
+                        e_next = self.__topK(energy_logits, topK)
                     elif method == "Nucleus":
-                        e_next = self.__nucleus(time_logits, nucleus_p)
+                        e_next = self.__nucleus(energy_logits, nucleus_p)
                     elif method == "Greedy":
-                        e_next = torch.argmax(time_logits, dim=-1, keepdim=True)
+                        e_next = torch.argmax(energy_logits, dim=-1, keepdim=True)
                     else:
-                        e_next = self.__min_p(time_logits)
+                        e_next = self.__min_p(energy_logits)
                 else:
-                    e_next = time_val.unsqueeze(1)
+                    e_next = energy_val.unsqueeze(1)
 
                 # EOS handling
                 if self.digitize_energy:
@@ -961,7 +1014,7 @@ class ECAL_GPT(nn.Module):
         return idx_buffer, e_buffer
 
     def forward_decode_step(self, x_t, e_t, material_index,
-                            padding_mask=None, kv_caches=None, is_first_step=False):
+                            padding_mask=None, kv_caches=None, is_first_step=False, particle_type="gamma"):
         """
         Args:
             x_t: [B, T_new, E] where T_new=2 on first step, 1 after
@@ -981,12 +1034,18 @@ class ECAL_GPT(nn.Module):
         new_caches = []
         
         for i, (layer, cache) in enumerate(zip(self.layers, kv_caches)):
+            lora_mod = None
+            if hasattr(self, 'particle_lora') and particle_type in self.particle_lora:
+                lora_list = self.particle_lora[particle_type]
+                if isinstance(lora_list, (list, nn.ModuleList)) and len(lora_list) > 0:
+                    lora_mod = lora_list[i] if lora_list[i] is not None else None
+
             if isinstance(layer, CATransformerBlock):
                 x, updated_cache, _lb = layer(
                     x, e, material_index,
                     padding_mask=padding_mask,
                     classification=self.classification,
-                    past_kv=cache
+                    past_kv=cache,LoRA_module=lora_mod
                 )
                 new_caches.append(updated_cache)
             else:
@@ -994,7 +1053,7 @@ class ECAL_GPT(nn.Module):
                     x, material_index,
                     padding_mask=padding_mask,
                     classification=self.classification,
-                    past_kv=cache
+                    past_kv=cache,LoRA_module=lora_mod
                 )
                 new_caches.append(updated_cache)
 
@@ -1004,58 +1063,3 @@ class ECAL_GPT(nn.Module):
         x = x[:, -1:, :]
         
         return x, new_caches
-
-    @torch.no_grad()
-    def generate_PDF(self, kinematics, unscaled_k, PID=None, numPhotons=2e5, max_seq_len: int = 250,
-                 context_len=None, temperature: float = 1.05, method="Nucleus", topK=100,
-                 nucleus_p=0.995, dynamic_temp=False, add_dark_noise=False):
-
-        assert kinematics is not None
-
-        batch_size = kinematics.shape[0]
-        kbar = pkbar.Kbar(target=numPhotons, width=20, always_stateful=False)
-
-        torch.cuda.empty_cache()
-        tracks = []
-        n_total = 0
-
-        if PID == "Pion" and self.use_MoE:
-            class_label = torch.zeros((batch_size,), dtype=torch.float32, device=kinematics.device)
-        elif PID == "Kaon" and self.use_MoE:
-            class_label = torch.ones((batch_size,), dtype=torch.float32, device=kinematics.device)
-        else:
-            class_label = None
-
-        while n_total < numPhotons:
-
-            with torch.no_grad():
-                track = self.generate(kinematics, unscaled_k, class_label=class_label, method=method, temperature=temperature,
-                                      topK=topK, nucleus_p=nucleus_p, dynamic_temp=dynamic_temp, add_dark_noise=add_dark_noise)
-
-            tracks += track
-            n_generated = self.__count_photons(track)
-            n_total += n_generated
-
-            kbar.add(n_generated)
-
-        torch.cuda.empty_cache()
-
-
-        xs, ys, times = [], [], []
-
-        for track_ in tracks:
-            xs.append(track_['x'])
-            ys.append(track_['y'])
-            times.append(track_['leadTime'])
-
-        xs = np.concatenate(xs)[:numPhotons]
-        ys = np.concatenate(ys)[:numPhotons]
-        times = np.concatenate(times)[:numPhotons]
-        return {"x": xs, "y": ys, "leadTime": times}
-
-    def __count_photons(self, tracks):
-        counter = 0
-        for track in tracks:
-            counter += track["NHits"]
-
-        return counter

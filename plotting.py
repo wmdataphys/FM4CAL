@@ -1554,7 +1554,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
 
     energy_sum = 2000
     energy = 70
-    n_hits = 1700
+    n_hits = 2100
 
     energy_bins = np.logspace(np.log10(0.01), np.log10(energy), 50)  # Logarithmic bins for energy
     energy_sum_bins = np.arange(0, energy_sum, 75)

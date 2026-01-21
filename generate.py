@@ -47,6 +47,10 @@ def main(config,args):
     use_MoE = bool(config['model']['use_MoE'])
     digitize_energy = bool(config['digitize_energy'])
     use_kv_cache = bool(args.use_kv_cache)
+    base_model_type = config['base_model_type']
+    particle_list = config['particle_list']
+    lora_r = config['model']['LoRA_r']
+    lora_alpha = config['model']['LoRA_alpha']
 
     energy_res = config['stats']['token_energy_res']
     e_max = config['stats']['token_energy_max']
@@ -76,6 +80,10 @@ def main(config,args):
     print("Sampling Method: ", args.sampling_method)
     print("Using AMP: ", args.use_amp)
     print("Using KV Cache: ", args.use_kv_cache)
+    print("Sampling method: ", args.sampling_method)
+    print("Temperature: ", args.temperature)
+    print("Generating showers for materials: ", materials_to_generate)
+    print("Number of showers to generate: ", args.num_showers)
     print("=====================================")
 
     print("Digitizing Energy - classification over adjacent vocabulary.")
@@ -95,11 +103,16 @@ def main(config,args):
                 drop_rates=drop_rates,
                 use_MoE=use_MoE,
                 num_experts=num_experts,
-                material_list=material_list).to(args.device)
+                material_list=material_list,
+                base_model_type=base_model_type,
+                particle_list=particle_list,
+                LoRA_r=lora_r,
+                LoRA_alpha=lora_alpha
+                ).to(args.device)
 
     model_path = config['Inference']['model_path']
     checkpoint = torch.load(model_path, map_location=device)
-    model.load_state_dict(checkpoint["net_state_dict"])
+    model.load_state_dict(checkpoint["net_state_dict"],strict=True)
 
     scaler = None
     if args.use_amp:
@@ -117,6 +130,11 @@ def main(config,args):
 
     model.eval()
 
+    for name, param in model.named_parameters():
+        if "IA3" in name:
+            print(f"Parameter {name} has value: {param.data}")
+            
+
     # (Optional) compile AFTER loading. If you stay on CPU, compiling may not help; feel free to skip.
     try:
         if use_kv_cache == True:
@@ -131,14 +149,22 @@ def main(config,args):
         # e.g., material = "G4_W_gamma" -> config['dataset']['test']['G4_W_gamma_test_files']
         # e.g., material = "G4_W_electron" -> config['dataset']['test']['G4_W_electron_test_files']
         test_files += read_text(config['dataset']['testing'][material + '_test_files'])
+        if "e-" in material:
+            particle_type = "e-"
+        elif "gamma" in material:
+            particle_type = "gamma"
+        else:
+            raise ValueError("Unknown particle type in material: ", material)
+        
 
     global_e_max = config['stats']['global_energy_max']
     global_e_min = config['stats']['global_energy_min']
     stats = {"Initial_Energy_Max": global_e_max, "Initial_Energy_Min": global_e_min}
     
     # test_files = [twb,tab,tpb]  # for quick testing
-    test_files = [test_files[0],test_files[1],test_files[-2],test_files[-1]]  
-    #test_files = test_files[:5] + test_files[-5:]  # for quick testing
+    # test_files = [test_files[0],test_files[1],test_files[-2],test_files[-1]]  
+    # test_files = test_files[:1] #+ test_files[-5:]  # for quick testing
+    #test_files = test_files[:2] # for quick testing
 
     dataset = ECAL_Chunked_Dataset(test_files,max_seq_length=msl,
                 energy_digitizer=energy_digitizer,verbose=True,
@@ -183,8 +209,8 @@ def main(config,args):
                         material_index=material_index,
                         method=args.sampling_method,
                         max_seq_len=msl,
-                        temperature=1.0,
-                        use_kv_cache=args.use_kv_cache,    
+                        temperature=args.temperature,
+                        use_kv_cache=args.use_kv_cache,particle_type=particle_type    
                     )
             else:
                 generated_indices, generated_energies = model.generate(
@@ -192,8 +218,8 @@ def main(config,args):
                     material_index=material_index,
                     method=args.sampling_method,
                     max_seq_len=msl,
-                    temperature=1.0,
-                    use_kv_cache=args.use_kv_cache,
+                    temperature=args.temperature,
+                    use_kv_cache=args.use_kv_cache,particle_type=particle_type
                 )
 
             generated_indices = generated_indices.detach().cpu().numpy()
@@ -313,6 +339,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_amp', action='store_true', help='Whether to use automatic mixed precision.')
     parser.add_argument('--num_showers', type=int, default=-1, help='Number of showers to generate for plotting. -1 for all.')
     parser.add_argument('--materials_to_generate', type=str, nargs='+', default=None, help='List of materials to generate showers for. If not set, generates for all materials in config.')
+    parser.add_argument('--temperature', type=float, default=1.0, help='Sampling temperature during generation.')
     args = parser.parse_args()
 
     os.makedirs("Generations", exist_ok=True)

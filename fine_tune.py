@@ -25,17 +25,14 @@ from dataloader.dataset import ECAL_Chunked_Dataset
 from dataloader.dataloader import CreateLoaderMoE
 
 from models.GPT import ECAL_GPT
+from models.MoE import MoE
 import torch.multiprocessing as mp
 import torch.distributed as dist
 
 warnings.filterwarnings("ignore", message=".*weights_only.*")
 
 
-def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma','G4_Ta_gamma'],material_to_add=None,closest_expert=None):
-
-    assert material_to_add is not None, "Material to add for fine-tuning must be specified."
-
-def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma','G4_Ta_gamma'],material_to_add=None,closest_expert=None):
+def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma','G4_Ta_gamma'],material_to_add=None,closest_expert=None,base_particle_list=None,particle_type=None):
 
     assert material_to_add is not None, "Material to add for fine-tuning must be specified."
 
@@ -53,6 +50,8 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
     num_experts = len(materials_list)
     use_MoE = bool(config['model']['use_MoE'])
     digitize_energy = bool(config['digitize_energy'])
+    loRA_r = config['model']['LoRA_r']
+    loRA_alpha = config['model']['LoRA_alpha']
 
     if fine_tune_path is not None:
         print("Loading pre-trained model from: ", fine_tune_path)
@@ -61,6 +60,9 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
     else:
         state_dict = None
     
+    if base_particle_list is None:
+        base_particle_list = config['particle_list']
+
     net = ECAL_GPT(vocab_size,
                    msl,
                    embed_dim,
@@ -73,19 +75,46 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
                 drop_rates=drop_rates,
                 use_MoE=use_MoE,
                 num_experts=num_experts,
-                material_list=materials_list)
+                material_list=materials_list,
+                particle_list=base_particle_list,
+                LoRA_r=loRA_r,
+                LoRA_alpha=loRA_alpha,
+                base_model_type=config['base_model_type']) # This is what we have trained on first, ever
+                # If we fine tune from W_gamma -> W_e-, then base_model_type='gamma' but base_particle_list=['gamma','e-']
+                # So model knows for e- to use LoRA + experts for e- and just experts for gamma if we fine tune to say G4_Pb_gamma
                 
     if state_dict:
         print("Loding state dict into model...")
         net.load_state_dict(state_dict,strict=False)
 
 
-    net.extend_model(materials_list + [material_to_add], closest_expert=closest_expert)
+    experts_per_class = net.num_experts // len(default_material_list)
+    net.extend_model(materials_list + [material_to_add], closest_expert=closest_expert, particle_type=particle_type)
+
+    print("\n========= New Expert Weight Check =========")
+    for layer_idx, layer in enumerate(net.layers):
+        if hasattr(layer, 'FF') and isinstance(layer.FF, MoE):
+            if closest_expert is not None:
+                source_idx = default_material_list.index(closest_expert) * experts_per_class
+            else:
+                source_idx = len(default_material_list) - 1  # Last old expert
+            
+            source_expert = layer.FF.experts[source_idx]
+            new_expert = layer.FF.experts[-1]  # Last expert (newly added)
+            
+            # Compare first layer weights
+            old_w = source_expert.nn[0].weight.data
+            new_w = new_expert.nn[0].weight.data
+            
+            are_same = torch.allclose(old_w, new_w, rtol=1e-5)
+            print(f"Layer {layer_idx}: New expert (idx={len(layer.FF.experts)-1}) vs Source expert '{closest_expert}' (idx={source_idx}): {'MATCH' if are_same else 'DO NOT MATCH'}")
+    print("==========================================\n")
+
 
     return net 
 
 class Trainer:
-    def __init__(self, config, rank, world_size, model,default_material_list=None,material_to_add=None):
+    def __init__(self, config, rank, world_size, model, default_material_list=None, material_to_add=None, particle_type="gamma"):
         self.rank = rank
         self.world_size = world_size
         self.config = config
@@ -93,7 +122,7 @@ class Trainer:
         self.exp_name = config['name']
         self.device = torch.device(f"cuda:{rank}")
         self.model = model.to(self.device)
-
+        self.particle_type = particle_type
         self.freeze_model(self.model)
 
         self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[rank])
@@ -122,6 +151,7 @@ class Trainer:
         if self.material_to_add is not None:
             self.material_list.append(self.material_to_add)
 
+
         if self.rank == 0:
             print("========= Special Tokens ============")
             print(f"Pixels - Pad: {self.pad_token}, SOS: {self.SOS_token}, EOS: {self.EOS_token}")
@@ -133,6 +163,12 @@ class Trainer:
         self.energy_loss_fn = None  # you’ll need to define this or import it
 
         self.optimizer = torch.optim.RAdam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=float(config['optimizer']['lr']))
+        self.num_epochs = config['num_epochs']
+        # Decrease LR at epoch 1,10,50,75% of total epochs
+        # LR goes like Epoch 0:1e-3 -> Epoch 1:1e-4 -> Epoch 50:1e-5 -> Epoch 75:1e-6
+        milestones = [int(0.1 * self.num_epochs), int(0.5 * self.num_epochs), int(0.75 * self.num_epochs)]
+        self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=milestones,gamma=0.1)
+        print("Using LR Scheduler with milestones at epochs: ", milestones)
         self.history = {'train_loss': [], 'val_loss': []}
         self.global_step = 0
         self.epoch = 0
@@ -155,6 +191,10 @@ class Trainer:
                 print("Using regression over energy domain.")
 
     def freeze_model(self, model):
+        # Decide if we freeze LoRA as well
+        use_lora = (self.particle_type != model.base_model_type)
+        lora_exists = not model.lora_newly_created 
+
         # Get the material list - last material is the new one
         new_material_idx = len(model.material_list) - 1
         num_classes = model.num_classes
@@ -171,8 +211,10 @@ class Trainer:
             print(f"New material: {model.material_list[-1]} (index {new_material_idx})")
             print(f"Experts per class: {experts_per_class}")
             print(f"New expert indices: [{new_expert_start_idx}, {new_expert_end_idx})")
+            print(f"Base particle: {model.base_model_type} | Fine-tune particle: {self.particle_type}")
+            print(f"Use LoRA: {use_lora} | LoRA exists (will freeze): {lora_exists}")
             print(f"============================================\n")
-        
+
         frozen_params = 0
         trainable_params = 0
         trainable_names = []
@@ -193,6 +235,44 @@ class Trainer:
                 keep_trainable = True
                 trainable_names.append(name)
             
+            # Check LoRA freeze condition
+            if "particle_lora" in name:
+                if lora_exists:
+                    # LoRA already trained, freeze it for new materials
+                    keep_trainable = False
+                else:
+                    # First time training LoRA for this particle
+                    keep_trainable = True
+                    trainable_names.append(name)
+
+            # Check Embedding LoRA freeze condition
+            if "embedding_adapter" in name:
+                if lora_exists:
+                    # LoRA already trained, freeze it for new materials
+                    keep_trainable = False
+                else:
+                    # First time training LoRA for this particle
+                    keep_trainable = True
+                    trainable_names.append(name)
+            
+            # Check Vocab LoRA freeze condition
+            if "vocab_lora" in name:
+                if lora_exists:
+                    # LoRA already trained, freeze it for new materials
+                    keep_trainable = False
+                else:
+                    # First time training LoRA for this particle
+                    keep_trainable = True
+                    trainable_names.append(name)
+
+            # Check entropy modulation parameter
+            if "entropy_modulation" in name:
+                if use_lora:
+                    keep_trainable = True
+                    trainable_names.append(name)
+                else:
+                    keep_trainable = False
+
             # Freeze everything else (attention, embeddings, old experts, etc.)
             param.requires_grad = keep_trainable
             
@@ -255,7 +335,7 @@ class Trainer:
 
             if self.use_amp:
                 with autocast(dtype=torch.float16):
-                    logits, e, load_balance = self.model(tokens, energies, initial_energy, material_index=material_index, padding_mask=padding_mask)
+                    logits, e, load_balance = self.model(tokens, energies, initial_energy, material_index=material_index, padding_mask=padding_mask, particle_type=self.particle_type)
 
                     logits = logits[:, skip_idx:, :]
                     e = e[:, skip_idx:, :]
@@ -281,7 +361,7 @@ class Trainer:
 
             else:
                 with torch.set_grad_enabled(True):
-                    logits, e, load_balance = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask)
+                    logits, e, load_balance = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask, particle_type=self.particle_type)
 
                 # Slice off the prepended initial energy token
                 logits = logits[:, skip_idx:, :]
@@ -343,7 +423,7 @@ class Trainer:
 
                     padding_mask = (tokens == self.pad_token).to(self.device)
 
-                    logits,e = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask)
+                    logits,e = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask,particle_type=self.particle_type)
                     logits = logits[:, skip_idx:, :]
                     e = e[:, skip_idx:, :]
 
@@ -384,7 +464,8 @@ class Trainer:
                 'global_step': self.global_step,
             }, filename)
 
-def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tune_path=None, default_material_list=None, material_to_add=None, closest_expert=None, run_val=True, write_path=None, checkpoint=None):
+def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tune_path=None, default_material_list=None, material_to_add=None, closest_expert=None, run_val=True, write_path=None, checkpoint=None,
+               base_particle_list=["gamma"], particle_type='gamma'):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
@@ -405,8 +486,8 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tu
 
     print(f"Rank {rank} - Starting training with {num_files} files, chunk size: {chunk_size}, num epochs: {num_epochs}")
 
-    model = create_model(config, fine_tune_path=fine_tune_path, default_material_list=default_material_list, material_to_add=material_to_add, closest_expert=closest_expert)
-    trainer = Trainer(config, rank, world_size, model,default_material_list=default_material_list,material_to_add=material_to_add)
+    model = create_model(config, fine_tune_path=fine_tune_path, default_material_list=default_material_list, material_to_add=material_to_add, closest_expert=closest_expert, base_particle_list=base_particle_list, particle_type=particle_type)
+    trainer = Trainer(config, rank, world_size, model, default_material_list=default_material_list, material_to_add=material_to_add, particle_type=particle_type)
 
     if checkpoint is not None:
         if 'net_state_dict' in checkpoint:
@@ -432,6 +513,9 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tu
         torch.cuda.empty_cache()  
         gc.collect()
 
+        if rank == 0:
+            print("Learning rate: ", trainer.scheduler.get_last_lr()[0])
+
         shuffled_files = np.array(all_train_files)[np.random.permutation(len(all_train_files))].tolist()
         
         for start_idx in range(0, num_files, chunk_size):
@@ -443,6 +527,8 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tu
 
             #print("Starting training for epoch", epoch, "chunk", start_idx // chunk_size + 1)
             trainer.train_epoch(train_loader, sampler)
+
+        trainer.scheduler.step()
 
         if run_val:
             random_idx = np.random.randint(0, len(all_val_files), val_chunk_size)
@@ -466,7 +552,7 @@ def read_text(file_path):
     except FileNotFoundError:
         raise ValueError(f"Error: The file '{file_path}' was not found.")
 
-def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_path=None, material_to_add=None, closest_expert=None):
+def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_path=None, material_to_add=None, closest_expert=None, base_particle_list=["gamma"], particle_type="gamma"):
     # Setup random seed
     torch.manual_seed(config['seed'])
     np.random.seed(config['seed'])
@@ -492,8 +578,11 @@ def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_pat
     train_files = []
     val_files = []
 
-    print("Default model trained on materials: ", default_material_list)
+    print("Default model trained on material(s): ", default_material_list)
+    print("Default model trained on particle type(s): ", base_particle_list)
     print("Adding material for fine-tuning: ", material_to_add)
+    print("Particle type(s) for fine-tuning: ", particle_type)
+    print("Closest expert for initialization: ", closest_expert)
 
 
     train_files += read_text(config['dataset']['training'][material_to_add + '_train_files'])
@@ -511,7 +600,9 @@ def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_pat
                fine_tune_path=fine_tune_path,
                default_material_list=default_material_list,
                material_to_add=material_to_add,
-               closest_expert=closest_expert)
+               closest_expert=closest_expert,
+               base_particle_list=base_particle_list,
+               particle_type=particle_type)
 
 if __name__=='__main__':
     # PARSE THE ARGS
@@ -519,9 +610,12 @@ if __name__=='__main__':
     parser.add_argument('-c', '--config', default='config.json',type=str,
                         help='Path to the config file (default: config.json)')
     parser.add_argument('-m', '--default_material_list', nargs='+', default=["G4_W_gamma","G4_Ta_gamma"],
-                        help='List of materials to include in training (default: ["G4_W_gamma","G4_Ta_gamma"])')
+                        help='List of materials to include in pre-training (default: ["G4_W_gamma","G4_Ta_gamma"])')
     parser.add_argument('--material_to_add', type=str, default="G4_Pb_gamma",
-                        help='Material to add for fine-tuning (e.g., "G4_Pb_gamma")')                    
+                        help='Material to add for fine-tuning (e.g., "G4_Pb_gamma,G4_W_e-")')
+    parser.add_argument('--base_particle_list', nargs='+', default=["gamma"],
+                        help='List of particle types the base model was pre-trained on (default: ["gamma"])')
+    parser.add_argument('--particle_type', type=str, default="gamma",help='Particle type to add for fine-tuning (e.g., "gamma,e-")')
     parser.add_argument('--fine_tune_path', type=str, default=None,
                         help='Path to the pre-trained model checkpoint for fine-tuning')
     parser.add_argument('--closest_expert', type=str, default=None,
@@ -530,4 +624,4 @@ if __name__=='__main__':
 
     config = json.load(open(args.config))
 
-    main(config,args.default_material_list,args.fine_tune_path,args.material_to_add,args.closest_expert)
+    main(config,args.default_material_list,args.fine_tune_path,args.material_to_add,args.closest_expert,args.base_particle_list,args.particle_type)

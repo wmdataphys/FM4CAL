@@ -40,6 +40,10 @@ plotting/
 Generations/
 outputs/
 *Plots*
+
+# Old Files to ignore
+models/GPT_orig.py
+
 # Ignore model weights
 Trained_Models/
 

@@ -95,6 +95,10 @@ class ECAL_Chunked_Dataset(Dataset):
                 for key in f.keys():
                     group = f[key]
                     indices = group["indices"][()]
+
+                    if len(indices) < 1:  # Skip empty showers
+                        continue
+
                     values = group["values"][()]
                     initial_energy = group.attrs["initial_energy"].item()
                     material = group['material'][()].decode('utf-8')
