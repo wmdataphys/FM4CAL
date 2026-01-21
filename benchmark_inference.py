@@ -6,8 +6,220 @@ import logging
 from datetime import datetime
 from tqdm import tqdm
 import torch.profiler as profiler
+import warnings
+import logging
+import os
+os.environ['TORCH_LOGS'] = '-dynamo'
 
 from models.GPT import ECAL_GPT
+import quanto
+
+def quantize_model(model, device, logger):
+    """Apply INT8 quantization using quanto (CPU/CUDA compatible)"""
+    try:
+        from quanto import quantize, freeze
+        
+        logger.info("Applying INT8 quantization with quanto...")
+        
+        from quanto import qint8
+        quantize(model, weights=qint8, activations=None)
+        
+        # Freeze for inference
+        freeze(model)
+        
+        logger.info("Quantization successful")
+        return model
+        
+    except ImportError:
+        logger.error("quanto library not found. Install with: pip install quanto")
+        logger.error("Skipping quantization")
+        return model
+
+def fuse_qkv_weights(model):
+    """
+    Fuse separate Q, K, V projections into single QKV projection.
+    Only for MHSA (self-attention) layers, not CrossAttention.
+    """
+    import torch.nn as nn
+    
+    def make_fused_forward(attn_module):
+        """Factory to avoid closure issues"""
+        def fused_forward(x, attn_mask=None, key_padding_mask=None,
+                        need_weights=False, past_kv=None):
+            batch_size, T_new, embed_dim = x.shape
+            
+            # Fused QKV projection
+            qkv = attn_module.qkv_proj(x)  # [B, T, 3*E]
+            qkv = qkv.view(batch_size, T_new, 3, attn_module.num_heads, attn_module.head_dim)
+            qkv = qkv.permute(2, 0, 3, 1, 4)  # [3, B, H, T, D]
+            q, k, v = qkv[0], qkv[1], qkv[2]
+            
+            # Normalize Q and K
+            if attn_module.qk_norm:
+                k = torch.nn.functional.normalize(k, p=2, dim=-1)
+                q = torch.nn.functional.normalize(q, p=2, dim=-1)
+            
+            # Handle KV cache
+            if past_kv is not None:
+                cache_k = past_kv['k']
+                cache_v = past_kv['v']
+                curr_len = past_kv['seq_len']
+                
+                cache_k[:, :, curr_len:curr_len+T_new] = k
+                cache_v[:, :, curr_len:curr_len+T_new] = v
+                
+                new_len = curr_len + T_new
+                k = cache_k[:, :, :new_len]
+                v = cache_v[:, :, :new_len]
+                
+                past_kv['seq_len'] = new_len
+                updated_cache = past_kv
+            else:
+                updated_cache = None
+            
+            # Compute attention
+            if attn_module.qk_norm:
+                attn_scores = attn_module.g_scale * q @ k.transpose(2, 3)
+            else:
+                attn_scores = attn_module.d_k * q @ k.transpose(2, 3)
+            
+            if attn_mask is not None:
+                attn_scores.masked_fill_(attn_mask, -torch.inf)
+            
+            if key_padding_mask is not None:
+                key_padding_mask = key_padding_mask[:, None, None, :]
+                attn_scores.masked_fill_(key_padding_mask, -torch.inf)
+            
+            attn_scores = torch.nn.functional.softmax(attn_scores, dim=-1)
+            attn_scores = attn_module.dropout(attn_scores)
+            
+            attn_output = (attn_scores @ v).transpose(1, 2)
+            attn_output = attn_output.contiguous().view(batch_size, T_new, embed_dim)
+            
+            if need_weights:
+                return attn_output, attn_scores
+            else:
+                return (attn_output, updated_cache)
+        
+        return fused_forward
+    
+    for i, layer in enumerate(model.layers):
+        if hasattr(layer, 'attn') and hasattr(layer.attn, 'q_proj'):
+            attn = layer.attn
+            
+            # Skip CrossAttention (layer 0), only fuse MHSA
+            if i == 0:
+                continue
+            
+            # Get existing weights
+            w_q = attn.q_proj.weight.data
+            w_k = attn.k_proj.weight.data
+            w_v = attn.v_proj.weight.data
+            
+            embed_dim = w_q.size(0)
+            
+            # Create fused projection
+            fused_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=False).to(w_q.device)
+            
+            # Stack weights: [3*E, E]
+            with torch.inference_mode():
+                fused_proj.weight.data[:embed_dim] = w_q
+                fused_proj.weight.data[embed_dim:2*embed_dim] = w_k
+                fused_proj.weight.data[2*embed_dim:] = w_v
+            
+            # Replace the projection
+            attn.qkv_proj = fused_proj
+            
+            # Replace forward method using factory
+            attn.forward = make_fused_forward(attn)
+            
+            # Delete old projections to save memory
+            del attn.q_proj
+            del attn.k_proj
+            del attn.v_proj
+    
+    return model
+
+def fuse_cross_attention_kv(model):
+    """Fuse K,V projections in CrossAttention (layer 0)"""
+    import torch.nn as nn
+    import torch.nn.functional as F
+    
+    class FusedCrossAttnForward:
+        def __init__(self, attn_module):
+            self.attn = attn_module
+            
+        def __call__(self, x, e_embed, attn_mask=None, key_padding_mask=None,
+                    need_weights=False, past_kv=None):
+            B, T, E = x.shape
+            
+            # Fused K,V from x
+            kv = self.attn.kv_proj(x).reshape(B, T, 2, self.attn.num_heads, self.attn.head_dim)
+            k, v = kv.unbind(dim=2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            
+            # Separate Q from e_embed
+            q = self.attn.q_proj(e_embed)
+            q = q.view(B, T, self.attn.num_heads, self.attn.head_dim).transpose(1, 2)
+            
+            # QK normalization
+            if self.attn.qk_norm:
+                k = F.normalize(k, p=2, dim=-1)
+                q = F.normalize(q, p=2, dim=-1)
+            
+            # KV cache handling
+            if past_kv is not None:
+                cache_k, cache_v = past_kv['k'], past_kv['v']
+                curr_len = past_kv['seq_len']
+                
+                cache_k[:, :, curr_len:curr_len+T] = k
+                cache_v[:, :, curr_len:curr_len+T] = v
+                
+                new_len = curr_len + T
+                k = cache_k[:, :, :new_len]
+                v = cache_v[:, :, :new_len]
+                past_kv['seq_len'] = new_len
+                updated_cache = past_kv
+            else:
+                updated_cache = None
+            
+            # Attention computation
+            scale = self.attn.g_scale if self.attn.qk_norm else self.attn.d_k
+            attn_scores = scale * (q @ k.transpose(2, 3))
+            
+            if attn_mask is not None:
+                attn_scores.masked_fill_(attn_mask, float('-inf'))
+            if key_padding_mask is not None:
+                attn_scores.masked_fill_(key_padding_mask[:, None, None, :], float('-inf'))
+            
+            attn_scores = F.softmax(attn_scores, dim=-1)
+            attn_scores = self.attn.dropout(attn_scores)
+            
+            out = (attn_scores @ v).transpose(1, 2).reshape(B, T, E)
+            
+            return (out, attn_scores) if need_weights else (out, updated_cache)
+    
+    layer0 = model.layers[0]
+    if hasattr(layer0, 'attn') and hasattr(layer0.attn, 'k_proj'):
+        attn = layer0.attn
+        
+        # Fuse K,V only (Q stays separate)
+        w_k = attn.k_proj.weight.data
+        w_v = attn.v_proj.weight.data
+        E = w_k.size(0)
+        
+        kv_fused = nn.Linear(E, 2*E, bias=False, device=w_k.device)
+        with torch.inference_mode():
+            kv_fused.weight.data = torch.cat([w_k, w_v], dim=0)
+        
+        attn.kv_proj = kv_fused
+        attn.forward = FusedCrossAttnForward(attn)
+        
+        del attn.k_proj, attn.v_proj
+    
+    return model
+
 
 def log_sdpa_backends(logger):
     if not torch.cuda.is_available():
@@ -222,6 +434,11 @@ def main(args):
 
     logger = setup_logger()
 
+    # At the top of benchmark.py, right after imports
+    warnings.filterwarnings('ignore', message='.*skipping cudagraphs.*')
+    logging.getLogger('torch._inductor.utils').setLevel(logging.ERROR)
+    logging.getLogger('torch._dynamo').setLevel(logging.ERROR)
+
     device = "cuda" if args.device == "cuda" and torch.cuda.is_available() else "cpu"
 
     # Load Ta-only initial energies
@@ -260,6 +477,19 @@ def main(args):
 
     checkpoint = torch.load(args.model_path, map_location=device)
     model.load_state_dict(checkpoint["net_state_dict"], strict=True)
+
+    if args.fuse_qkv:
+        logger.info("Fusing QKV projections for optimization...")
+        model = fuse_qkv_weights(model)
+        logger.info("QKV fusion complete")
+        logger.info("Fusing K,V projections for CrossAttention layer...")
+        model = fuse_cross_attention_kv(model)
+        logger.info("CrossAttention K,V fusion complete")
+
+    if args.quantize:
+        logger.info("Applying INT8 quantization...")
+        model = quantize_model(model, device, logger)
+        logger.info("Quantization complete")
 
     if args.compile and device == "cuda":
         logger.info("Compiling model with torch.compile(...)")
@@ -330,6 +560,9 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=70)
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--fuse_qkv", action="store_true",
+                       help="Fuse Q, K, V projections for faster inference")
+    parser.add_argument('--quantize', action="store_true")
     parser.add_argument("--profile", action="store_true",
                        help="Run profiler to identify bottlenecks")
     parser.add_argument("--test_seq_lengths", action="store_true",

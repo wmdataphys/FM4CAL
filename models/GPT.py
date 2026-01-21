@@ -544,6 +544,17 @@ class ECAL_GPT(nn.Module):
                                      device=self.device) for i in range(1, len(self.attn_heads))]
         self.layers = nn.ModuleList(layers_)
 
+        self._compiled_decode = None
+
+    def _get_compiled_decode(self):
+        if self._compiled_decode is None:
+            self._compiled_decode = torch.compile(
+                self.forward_decode_step,
+                mode='reduce-overhead',
+                fullgraph=False
+            )
+        return self._compiled_decode
+
     def _allocate_kv_cache(self, batch_size, max_len, device, dtype=torch.float16):
         """
         Pre-allocate KV cache buffers to avoid concatenation overhead.
@@ -856,8 +867,10 @@ class ECAL_GPT(nn.Module):
                     device=device,
                     dtype=AMP_DTYPE
                 )
+            decode_fn = self._get_compiled_decode()
         else:
             kv_caches = [None] * len(self.layers)
+            decode_fn = self.forward_decode_step
 
         with torch.autocast(device_type="cuda", dtype=AMP_DTYPE):
             for step in range(max_seq_len):
@@ -904,7 +917,7 @@ class ECAL_GPT(nn.Module):
                         # Adapter on embeddings if avail
                         e_t = self.embedding_adapter[particle_type][1](e_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_t
 
-                    h_t, kv_caches = self.forward_decode_step(
+                    h_t, kv_caches = decode_fn(
                         x_t, e_t, material_index,
                         padding_mask=None,
                         kv_caches=kv_caches,
