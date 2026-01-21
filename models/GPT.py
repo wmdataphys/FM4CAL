@@ -184,7 +184,6 @@ class CATransformerBlock(nn.Module):
                 material_index,
                 padding_mask=None,
                 need_weights=False,
-                classification=False,
                 past_kv=None, LoRA_module=None):
         B, N_t, t_dim = x.shape
 
@@ -352,7 +351,6 @@ class TransformerBlock(nn.Module):
                 material_index,
                 padding_mask=None,
                 need_weights=False,
-                classification=False,
                 past_kv=None,
                 LoRA_module=None):
         B, N_t, t_dim = x.shape
@@ -361,7 +359,6 @@ class TransformerBlock(nn.Module):
 
         need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
         mask_ = self.generate_mask(N_t) if need_causal else None
-
 
         attn_out, kv_mhsa = self.attn(
                                 x_norm,
@@ -412,8 +409,6 @@ class ECAL_GPT(nn.Module):
         self.mlp_scale = mlp_scale  
         self.drop_rates = drop_rates
         self.use_MoE = use_MoE
-        self.classification = classification
-        self.sequence_level = sequence_level
         self.base_model_type = base_model_type
         self.LoRA_alpha = LoRA_alpha
         self.LoRA_r = LoRA_r
@@ -742,9 +737,9 @@ class ECAL_GPT(nn.Module):
                         lora_mod = lora_list[i] if lora_list[i] is not None else None
                 
                 if layer.__class__.__name__ == "CATransformerBlock":
-                    x, _kv, load = layer(x, e_embed, material_index, padding_mask=padding_mask, classification=self.classification,LoRA_module=lora_mod)
+                    x, _kv, load = layer(x, e_embed, material_index, padding_mask=padding_mask,LoRA_module=lora_mod)
                 else:
-                    x, _kv, load = layer(x, material_index, padding_mask=padding_mask, classification=self.classification,LoRA_module=lora_mod)
+                    x, _kv, load = layer(x, material_index, padding_mask=padding_mask,LoRA_module=lora_mod)
                 load_balance += load
         else:
             for i, layer in enumerate(self.layers):
@@ -755,29 +750,25 @@ class ECAL_GPT(nn.Module):
                         lora_mod = lora_list[i] if lora_list[i] is not None else None
             
                 if layer.__class__.__name__ == "CATransformerBlock":
-                    x, _kv, _lb = layer(x, e_embed, material_index, padding_mask=padding_mask, classification=self.classification,LoRA_module=lora_mod)
+                    x, _kv, _lb = layer(x, e_embed, material_index, padding_mask=padding_mask,LoRA_module=lora_mod)
                 else:
-                    x, _kv, _lb = layer(x, material_index, padding_mask=padding_mask, classification=self.classification,LoRA_module=lora_mod)
+                    x, _kv, _lb = layer(x, material_index, padding_mask=padding_mask,LoRA_module=lora_mod)
 
         x = self.LN(x)
 
-        if not self.classification and not self.sequence_level:  # Generations - next hit prediction - sequence level will also be false then
-            if not self.digitize_energy:
-                e_out = self.energy_head(x).squeeze(-1)  # direct regression of time
-            else:
-                delta_e = self.vocab_LoRA[particle_type][1](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
-                e_out = self.energy_head(x) + delta_e  # logits over time
+        delta_e = self.vocab_LoRA[particle_type][1](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
+        e_out = self.energy_head(x) + delta_e  # logits over time
 
-            delta_pixel = self.vocab_LoRA[particle_type][0](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
-            pixel = self.logits_head(x) + delta_pixel
+        delta_pixel = self.vocab_LoRA[particle_type][0](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
+        pixel = self.logits_head(x) + delta_pixel
 
-            e_out = self.vocab_LoRA[particle_type][1].apply_product(e_out) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else e_out
-            pixel = self.vocab_LoRA[particle_type][0].apply_product(pixel) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else pixel
+        e_out = self.vocab_LoRA[particle_type][1].apply_product(e_out) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else e_out
+        pixel = self.vocab_LoRA[particle_type][0].apply_product(pixel) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else pixel
 
-            if self.training:
-                return pixel, e_out, load_balance
+        if self.training:
+            return pixel, e_out, load_balance
 
-            return pixel, e_out
+        return pixel, e_out
 
     def __topK(self, logits, topK=50):
         topk_logits, topk_indices = torch.topk(logits, k=topK, dim=-1)
@@ -1044,7 +1035,6 @@ class ECAL_GPT(nn.Module):
                 x, updated_cache, _lb = layer(
                     x, e, material_index,
                     padding_mask=padding_mask,
-                    classification=self.classification,
                     past_kv=cache,LoRA_module=lora_mod
                 )
                 new_caches.append(updated_cache)
@@ -1052,7 +1042,6 @@ class ECAL_GPT(nn.Module):
                 x, updated_cache, _lb = layer(
                     x, material_index,
                     padding_mask=padding_mask,
-                    classification=self.classification,
                     past_kv=cache,LoRA_module=lora_mod
                 )
                 new_caches.append(updated_cache)

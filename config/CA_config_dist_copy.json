@@ -101,7 +101,7 @@
         }
   },
   "Inference": {
-    "model_path": "Trained_Models/IA3_Embedding_Adapter_DualVocab_Rank8_Alpha_16_e-___Jan-21-2026/Epoch00_loss_9.968455.pth",
+    "model_path": "Trained_Models/IA3_Embedding_Adapter_DualVocab_Rank8_Alpha_16_e-___Jan-21-2026/Epoch01_loss_9.957035.pth",
     "model_path_": "Trained_Models/EntropyMod_Dual_Vocab_LoRA_4xR_4xAlpha_Embed_QKV_c_proj_8Rank_16Alpha_W_Ta_Gamma_Base_ElectronTune___Jan-20-2026/Epoch00_loss_9.956043.pth",
     "model_path_": "Trained_Models/Dual_Vocab_LoRA_4xR_4xAlpha_Embed_QKV_c_proj_8Rank_16Alpha_W_Ta_Gamma_Base_ElectronTune___Jan-20-2026/Epoch01_loss_9.939039.pth",
     "model_path_dual": "Trained_Models/Dual_Vocab_LoRA_Embed_QKV_c_proj_8Rank_16Alpha_W_Ta_Gamma_Base_ElectronTune___Jan-19-2026/Epoch01_loss_9.969993.pth",
@@ -112,7 +112,7 @@
     "model_path_": "Trained_Models/FineTuning_W_Ta_with_Pb_V1___Dec-26-2025/Epoch07_loss_9.960306.pth",
     "model_path_256": "Trained_Models/25MeVTokens_256Embed_NoMatEmbedding_EnergyOrder___Dec-18-2025/Epoch16_loss_9.931702.pth",
     "model_path_384": "Trained_Models/25MeVTokens_384Embed_NoMatEmbedding_EnergyOrder___Dec-19-2025/Epoch07_loss_9.914091.pth",
-    "output_file": "IA3_LoRA_LowRank_Temp095.h5",
+    "output_file": "IA3_LoRA_LowRank_Temp1_Epoch01.h5",
     "batch_size": 2500,
     "num_workers": 0,
     "initial_energy_min": 10.0,
