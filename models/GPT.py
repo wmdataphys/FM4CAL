@@ -530,12 +530,22 @@ class ECAL_GPT(nn.Module):
         else:
             raise NotImplementedError("Classification and sequence-level modes are not implemented in this version.")
 
-
         self.SOS_token = 0
         self.EOS_token = space_vocab - 2  
         self.pad_token = space_vocab - 1  
         self.EOS_energy_token = energy_vocab - 2  
         self.energy_pad_token = energy_vocab - 1  
+
+        self._compiled_decode = None
+
+    def _get_compiled_decode(self):
+        if self._compiled_decode is None:
+            self._compiled_decode = torch.compile(
+                self.forward_decode_step,
+                mode='reduce-overhead',
+                fullgraph=False
+            )
+        return self._compiled_decode
 
     def _allocate_kv_cache(self, batch_size, max_len, device, dtype=torch.float16):
         """
@@ -828,8 +838,10 @@ class ECAL_GPT(nn.Module):
                     device=device,
                     dtype=AMP_DTYPE
                 )
+            decode_fn = self._get_compiled_decode()
         else:
             kv_caches = [None] * len(self.layers)
+            decode_fn = self.forward_decode_step
 
         with torch.autocast(device_type="cuda", dtype=AMP_DTYPE):
             for step in range(max_seq_len):
@@ -866,7 +878,7 @@ class ECAL_GPT(nn.Module):
                             e_t = self.energy_embedding(e_buffer[:, step:step+1].reshape(-1, 1)).view(B, 1, -1) + \
                                 self.energy_pos_embedding(pos_idx)
 
-                    h_t, kv_caches = self.forward_decode_step(
+                    h_t, kv_caches = decode_fn(
                         x_t, e_t, material_index,
                         padding_mask=None,
                         kv_caches=kv_caches,
