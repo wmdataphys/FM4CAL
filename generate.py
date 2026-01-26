@@ -1,3 +1,9 @@
+import os
+
+# Set these BEFORE importing torch
+os.environ["TORCH_LOGS"] = "-cudagraphs" # Explicitly subtract cudagraphs from logs
+os.environ["GLOG_minloglevel"] = "3"      # Suppress C++ Google Logs (3 = Fatal)
+
 import torch
 from torch.cuda.amp import autocast, GradScaler
 import numpy as np
@@ -6,7 +12,6 @@ import h5py
 from pathlib import Path
 import pkbar
 from datetime import datetime
-import os
 import argparse
 
 from plotting import make_plots
@@ -81,7 +86,7 @@ def main(config,args):
     print("Using AMP: ", args.use_amp)
     print("Using KV Cache: ", args.use_kv_cache)
     print("Sampling method: ", args.sampling_method)
-    print("Temperature: ", args.temperature)
+    print("Temperature: ", args.temperature) if not args.dynamic_temp else print("Dynamic Temperature: Enabled")
     print("Generating showers for materials: ", materials_to_generate)
     print("Number of showers to generate: ", args.num_showers)
     print("=====================================")
@@ -132,8 +137,11 @@ def main(config,args):
 
     for name, param in model.named_parameters():
         if "IA3" in name:
-            print(f"Parameter {name} has value: {param.data}")
-            
+            print(f"Parameter {name} has value: {param.data.cpu().numpy()}")
+
+    # for name, param in model.named_parameters():
+    #     if "lora" in name:
+    #         print(f"Parameter {name} has value: {param.data.cpu().numpy()}")
 
     # (Optional) compile AFTER loading. If you stay on CPU, compiling may not help; feel free to skip.
     try:
@@ -163,8 +171,8 @@ def main(config,args):
     
     # test_files = [twb,tab,tpb]  # for quick testing
     # test_files = [test_files[0],test_files[1],test_files[-2],test_files[-1]]  
-    # test_files = test_files[:1] #+ test_files[-5:]  # for quick testing
-    #test_files = test_files[:2] # for quick testing
+    # test_files = test_files[:1] + test_files[-1:]  # for quick testing
+    # test_files = test_files[:2] # for quick testing
 
     dataset = ECAL_Chunked_Dataset(test_files,max_seq_length=msl,
                 energy_digitizer=energy_digitizer,verbose=True,
@@ -208,6 +216,7 @@ def main(config,args):
                         initial_energy=initial_energy,
                         material_index=material_index,
                         method=args.sampling_method,
+                        dynamic_temp=args.dynamic_temp,
                         max_seq_len=msl,
                         temperature=args.temperature,
                         use_kv_cache=args.use_kv_cache,particle_type=particle_type    
@@ -217,6 +226,7 @@ def main(config,args):
                     initial_energy=initial_energy,
                     material_index=material_index,
                     method=args.sampling_method,
+                    dynamic_temp=args.dynamic_temp,
                     max_seq_len=msl,
                     temperature=args.temperature,
                     use_kv_cache=args.use_kv_cache,particle_type=particle_type
@@ -340,6 +350,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_showers', type=int, default=-1, help='Number of showers to generate for plotting. -1 for all.')
     parser.add_argument('--materials_to_generate', type=str, nargs='+', default=None, help='List of materials to generate showers for. If not set, generates for all materials in config.')
     parser.add_argument('--temperature', type=float, default=1.0, help='Sampling temperature during generation.')
+    parser.add_argument('--dynamic_temp', action='store_true', help='Whether to use dynamic temperature during generation.')
     args = parser.parse_args()
 
     os.makedirs("Generations", exist_ok=True)

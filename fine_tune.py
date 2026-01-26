@@ -166,7 +166,7 @@ class Trainer:
         self.num_epochs = config['num_epochs']
         # Decrease LR at epoch 1,10,50,75% of total epochs
         # LR goes like Epoch 0:1e-3 -> Epoch 1:1e-4 -> Epoch 50:1e-5 -> Epoch 75:1e-6
-        milestones = [int(0.1 * self.num_epochs), int(0.5 * self.num_epochs), int(0.75 * self.num_epochs)]
+        milestones = [5,int(0.1 * self.num_epochs), int(0.5 * self.num_epochs), int(0.75 * self.num_epochs)]
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=milestones,gamma=0.1)
         print("Using LR Scheduler with milestones at epochs: ", milestones)
         self.history = {'train_loss': [], 'val_loss': []}
@@ -265,14 +265,6 @@ class Trainer:
                     keep_trainable = True
                     trainable_names.append(name)
 
-            # Check entropy modulation parameter
-            if "entropy_modulation" in name:
-                if use_lora:
-                    keep_trainable = True
-                    trainable_names.append(name)
-                else:
-                    keep_trainable = False
-
             # Freeze everything else (attention, embeddings, old experts, etc.)
             param.requires_grad = keep_trainable
             
@@ -292,12 +284,13 @@ class Trainer:
                 print(f"  - {name}")
             print(f"==========================================\n")
 
-    def init_kbar(self,num_files,num_epochs=1):
-        total_samples = num_files * self.config['dataset']['tracks_per_file'] 
-        total_batches = total_samples // self.config['dataloader']['train']['batch_size'] # // self.world_size
+    def init_kbar(self, num_files, num_epochs=1):
+        total_samples = num_files * self.config['dataset']['tracks_per_file']
+        per_gpu_bs = self.config['dataloader']['train']['batch_size_ft'] // self.world_size
+        total_batches = math.ceil((total_samples / self.world_size) / per_gpu_bs)
         self.kbar = pkbar.Kbar(target=total_batches, epoch=self.epoch, num_epochs=num_epochs, width=20)
             
-    def load_chunked_dataset(self,file_list,verbose=False):
+    def load_chunked_dataset(self,file_list,verbose=False): 
         global_e_max = self.stats['global_energy_max']
         global_e_min = self.stats['global_energy_min']
         stats = {"Initial_Energy_Max": global_e_max, "Initial_Energy_Min": global_e_min}
@@ -305,7 +298,7 @@ class Trainer:
                                        ,verbose=verbose,ordering='energy',global_stats=stats,
                                        material_list=self.material_list)
         sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True)
-        loader = CreateLoaderMoE(dataset, sampler=sampler, batch_size=self.config['dataloader']['train']['batch_size_cls'] // self.world_size,
+        loader = CreateLoaderMoE(dataset, sampler=sampler, batch_size=self.config['dataloader']['train']['batch_size_ft'] // self.world_size,
                                 num_workers=self.config['dataloader']['train']['num_workers'],
                                 pin_memory=False,persistent_workers=False,prefetch_factor=self.config['dataloader']['train']['prefetch_factor'])
         return loader, sampler
@@ -423,7 +416,7 @@ class Trainer:
 
                     padding_mask = (tokens == self.pad_token).to(self.device)
 
-                    logits,e = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask,particle_type=self.particle_type)
+                    logits,e,_ = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask,particle_type=self.particle_type)
                     logits = logits[:, skip_idx:, :]
                     e = e[:, skip_idx:, :]
 

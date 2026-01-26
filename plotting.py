@@ -1554,12 +1554,13 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
 
     energy_sum = 2000
     energy = 70
-    n_hits = 2100
+    n_hits = 2000
 
     energy_bins = np.logspace(np.log10(0.01), np.log10(energy), 50)  # Logarithmic bins for energy
     energy_sum_bins = np.arange(0, energy_sum, 75)
     voxel_bins = np.arange(0, n_hits, 50)  # The number of hits
     dist_e_bins = np.arange(0, 21, 1)  # The distance
+    # bins_cog = np.arange(4, 25, 1.0)  # original - np.arange(8, 22, 0.5)
     bins_cog = np.arange(8, 22, 0.5)
     bins_z = np.arange(0, 31.5, 1)
 
@@ -1728,6 +1729,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax3.tick_params(axis="x", labelbottom=False)
     ax3.yaxis.set_major_formatter(ticker.ScalarFormatter(useMathText=True))
     ax3.ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True)
+    #ax3.set_yscale("log")
     ymin, ymax = ax3.get_ylim()
     new_ymax = ymax + 0.48 * ymax
     ax3.set_ylim(ymin, new_ymax)

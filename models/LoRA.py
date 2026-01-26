@@ -7,7 +7,9 @@ class LoRA(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.lora_r = lora_r
-        self.scale = alpha / lora_r
+        self.scale = alpha / math.sqrt(lora_r)
+        print(f"Using rank stabilization: scale = {self.scale}")
+        print(f"LoRA: embed_dim={embed_dim}, rank={lora_r}, alpha={alpha}, drop_rate={drop_rate}, mlp_scale={mlp_scale}")
         self.device = device
 
         # Combine LoRA and IA3
@@ -70,7 +72,9 @@ class Embed_LoRA(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.lora_r = lora_r
-        self.scale = alpha / lora_r
+        self.scale = alpha / math.sqrt(lora_r)
+        print(f"Using rank stabilization: scale = {self.scale}")
+        print(f"Embed LoRA: embed_dim={embed_dim}, rank={lora_r}, alpha={alpha}, drop_rate={drop_rate}")
         self.device = device
 
         self.lora_A_x = nn.Parameter(torch.randn(embed_dim, lora_r) * 0.01)
@@ -91,7 +95,9 @@ class Vocab_LoRA(nn.Module):
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.lora_r = lora_r
-        self.scale = alpha / lora_r
+        self.scale = alpha / math.sqrt(lora_r)
+        print(f"Vocab using rank stabilization: scale = {self.scale}")
+        print(f"Vocab LoRA: vocab_size={vocab_size}, embed_dim={embed_dim}, rank={lora_r}, alpha={alpha}, drop_rate={drop_rate}")
         self.device = device
 
         self.lora_A_vocab = nn.Parameter(torch.randn(lora_r, embed_dim) * 0.01) # [r, D]

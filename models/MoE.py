@@ -37,9 +37,8 @@ class Router(nn.Module):
         grad_masked[:, :, :num_old_experts] = 0.0
         return grad_masked
             
-        
     def forward(self,x,class_label,padding_mask=None,return_indices=False):
-        loss = None
+        loss = x.new_zeros(())
         indices = None
         B,seq,embed_dim = x.shape
         expert_mask = (self.expert_index.unsqueeze(0) == class_label.unsqueeze(1))  # (B, num_experts)
@@ -58,23 +57,20 @@ class Router(nn.Module):
             self.freeze_old_classes and self.old_num_classes is not None):
             weights.register_hook(self.mask_old_expert_grads)
 
-        if self.training:
-            if self.k == 1:
-                loss = torch.tensor(0.0)
+        if self.k > 1:
+            # We need per class expert balancing
+            target_load = expert_mask[:, None, :].expand(-1, x.size(1), -1).float() / self.k # (B,seq,num_experts)
+            load = weights # (B,seq,num_experts)
+
+            if padding_mask is not None:
+                valid_mask = (~padding_mask).float()  
+                valid_mask_exp = valid_mask.unsqueeze(-1)  
+                
+                diff = (target_load - load) ** 2
+
+                loss = (diff * valid_mask_exp).sum() / valid_mask_exp.sum()
             else:
-                # We need per class expert balancing
-                target_load = expert_mask[:, None, :].expand(-1, x.size(1), -1).float() / self.k # (B,seq,num_experts)
-                load = weights # (B,seq,num_experts)
-
-                if padding_mask is not None:
-                    valid_mask = (~padding_mask).float()  
-                    valid_mask_exp = valid_mask.unsqueeze(-1)  
-                    
-                    diff = (target_load - load) ** 2
-
-                    loss = (diff * valid_mask_exp).sum() / valid_mask_exp.sum()
-                else:
-                    loss = F.mse(target_load,load)
+                loss = F.mse(target_load,load)
 
         return weights,indices,loss
 
@@ -95,7 +91,6 @@ class MoE(nn.Module):
 
     def forward(self,x,class_label,padding_mask=None):
         B,seq_len,embed_dim = x.shape
-        load_balance = None
         weights,indices,load_balance = self.router(x,class_label,padding_mask=padding_mask) # (B,seq_len,num_experts),list -> len = batch, indices[0] = (2,)
         
         output = torch.zeros(x.shape,device=x.device) # (B,seq_len,embed_dim)
@@ -106,10 +101,6 @@ class MoE(nn.Module):
             output += weights[:,:,i].unsqueeze(-1) * expert(x)
 
         return output,load_balance
-
-
-
-
 
 
 

@@ -19,6 +19,8 @@ spec:
           mountPath: /sciclone/data10/jgiroux/ # Your username
         - name: scr30
           mountPath: /sciclone/scr30/jgiroux # Your username
+        - name: dshm
+          mountPath: /dev/shm
       command:
         - /bin/bash
         - -c
@@ -64,4 +66,4 @@ spec:
     - name: dshm
       emptyDir:
         medium: Memory
-        sizeLimit: 2Gi
+        sizeLimit: 4Gi
