@@ -79,25 +79,19 @@
             "num_workers": 2,
             "prefetch_factor": 1,
             "batch_size": 48,
-            "batch_size_MoE": 48,
-            "batch_size_cls": 48,
-            "batch_size_filtering": 48,
+            "batch_size_ft": 30,
             "chunk_size": 10
         },
         "val": {
             "batch_size": 48,
-            "batch_size_MoE": 48,
-            "batch_size_cls": 48,
-            "batch_size_filtering": 48,
+            "batch_size_ft": 30,
             "num_workers": 0,
             "chunk_size": 20
         },
         "test": {
             "batch_size": 256,
-            "batch_size_cls": 512,
-            "batch_size_filtering": 512,
-            "num_workers": 0,
-            "batch_size_DLL": 25
+            "batch_size_ft": 256,
+            "num_workers": 0
         }
   },
   "Inference": {
