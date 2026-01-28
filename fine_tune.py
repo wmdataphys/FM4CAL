@@ -48,10 +48,14 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
     drop_rates = config['model']['drop_rates']
     materials_list = default_material_list
     num_experts = len(materials_list)
-    use_MoE = bool(config['model']['use_MoE'])
-    digitize_energy = bool(config['digitize_energy'])
+    use_MoE = config['model']['use_MoE']
+    digitize_energy = config['digitize_energy']
     loRA_r = config['model']['LoRA_r']
     loRA_alpha = config['model']['LoRA_alpha']
+    enable_head_LoRA = config['model']['enable_head_LoRA']
+    enable_vocab_LoRA = config['model']['enable_vocab_LoRA']
+    enable_embedding_adapter = config['model']['enable_embedding_adapter']
+    vocab_LoRA_scale = config['model']['vocab_LoRA_scale']
 
     if fine_tune_path is not None:
         print("Loading pre-trained model from: ", fine_tune_path)
@@ -79,7 +83,12 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
                 particle_list=base_particle_list,
                 LoRA_r=loRA_r,
                 LoRA_alpha=loRA_alpha,
-                base_model_type=config['base_model_type']) # This is what we have trained on first, ever
+                base_model_type=config['base_model_type'],
+                enable_head_LoRA=enable_head_LoRA,
+                enable_vocab_LoRA=enable_vocab_LoRA,
+                enable_embedding_adapter=enable_embedding_adapter,
+                vocab_LoRA_scale=vocab_LoRA_scale,)
+                # Base model - This is what we have trained on first, ever
                 # If we fine tune from W_gamma -> W_e-, then base_model_type='gamma' but base_particle_list=['gamma','e-']
                 # So model knows for e- to use LoRA + experts for e- and just experts for gamma if we fine tune to say G4_Pb_gamma
                 
@@ -110,6 +119,29 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
             print(f"Layer {layer_idx}: New expert (idx={len(layer.FF.experts)-1}) vs Source expert '{closest_expert}' (idx={source_idx}): {'MATCH' if are_same else 'DO NOT MATCH'}")
     print("==========================================\n")
 
+    if not net.enable_vocab_LoRA:
+        print("\n========= New Vocab Projection Check =========")
+        old_space_w = net.logits_head.weight.data
+        old_space_b = net.logits_head.bias.data
+        new_space_w = net.vocab_LoRA[particle_type][0].weight.data
+        new_space_b = net.vocab_LoRA[particle_type][0].bias.data
+
+        old_ene_w = net.energy_head.weight.data
+        old_ene_b = net.energy_head.bias.data
+        new_ene_w = net.vocab_LoRA[particle_type][1].weight.data
+        new_ene_b = net.vocab_LoRA[particle_type][1].bias.data
+
+        w_match = torch.allclose(old_space_w, new_space_w, rtol=1e-5)
+        b_match = torch.allclose(old_space_b, new_space_b, rtol=1e-5)
+
+        ew_match = torch.allclose(old_ene_w, new_ene_w, rtol=1e-5)
+        eb_match = torch.allclose(old_ene_b, new_ene_b, rtol=1e-5)
+
+        print(f"Space vocab Projection Weights: New vs Old: {'MATCH' if w_match else 'DO NOT MATCH'}")
+        print(f"Space vocab Projection Bias: New vs Old: {'MATCH' if b_match else 'DO NOT MATCH'}")
+        print(f"Energy vocab Projection Weights: New vs Old: {'MATCH' if ew_match else 'DO NOT MATCH'}")
+        print(f"Energy vocab Projection Bias: New vs Old: {'MATCH' if eb_match else 'DO NOT MATCH'}")
+        print("==========================================\n")
 
     return net 
 
@@ -276,9 +308,9 @@ class Trainer:
         if self.rank == 0:
             print(f"\n========= Parameter Freeze Status =========")
             print(f"Trainable params: {trainable_params:,}")
-            print(f"Frozen params: {frozen_params:,}")
+            print(f"Frozen params: {frozen_params:,}") # This is the base model
             print(f"Total params: {trainable_params + frozen_params:,}")
-            print(f"Trainable %: {100 * trainable_params / (trainable_params + frozen_params):.2f}%")
+            print(f"Trainable %: {100 * trainable_params / (frozen_params):.2f}%")
             print(f"\nTrainable parameter names:")
             for name in trainable_names:
                 print(f"  - {name}")

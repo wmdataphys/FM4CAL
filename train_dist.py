@@ -46,8 +46,8 @@ def create_model(config,state_dict=None):
     drop_rates = config['model']['drop_rates']
     materials_list = config['material_list']
     num_experts = len(materials_list)
-    use_MoE = bool(config['model']['use_MoE'])
-    digitize_energy = bool(config['digitize_energy'])
+    use_MoE = config['model']['use_MoE']
+    digitize_energy = config['digitize_energy']
     
     net = ECAL_GPT(vocab_size,
                    msl,
@@ -305,7 +305,7 @@ class Trainer:
                 'net_state_dict': self.model.module.state_dict(),
                 'optimizer': self.optimizer.state_dict(),
                 'scheduler': self.scheduler.state_dict(),
-                'epoch': self.epoch + 1,
+                'epoch': self.epoch,
                 'history': self.history,
                 'global_step': self.global_step,
             }, filename)

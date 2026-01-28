@@ -20,7 +20,7 @@ from models.GPT import ECAL_GPT
 from dataloader.tokenizer import EnergyTokenizer
 from dataloader.dataset import ECAL_Chunked_Dataset
 from dataloader.dataloader import CreateInferenceLoader
-from utils.utils import read_text
+from utils.utils import read_text, singular_value_checks
 
 def main(config,args):
 
@@ -54,8 +54,12 @@ def main(config,args):
     use_kv_cache = bool(args.use_kv_cache)
     base_model_type = config['base_model_type']
     particle_list = config['particle_list']
-    lora_r = config['model']['LoRA_r']
-    lora_alpha = config['model']['LoRA_alpha']
+    loRA_r = config['model']['LoRA_r']
+    loRA_alpha = config['model']['LoRA_alpha']
+    enable_head_LoRA = config['model']['enable_head_LoRA']
+    enable_vocab_LoRA = config['model']['enable_vocab_LoRA']
+    enable_embedding_adapter = config['model']['enable_embedding_adapter']
+    vocab_LoRA_scale = config['model']['vocab_LoRA_scale']
 
     energy_res = config['stats']['token_energy_res']
     e_max = config['stats']['token_energy_max']
@@ -82,7 +86,6 @@ def main(config,args):
 
     print("========= Generation Started =========")
     print("Device: ", args.device)
-    print("Sampling Method: ", args.sampling_method)
     print("Using AMP: ", args.use_amp)
     print("Using KV Cache: ", args.use_kv_cache)
     print("Sampling method: ", args.sampling_method)
@@ -111,8 +114,12 @@ def main(config,args):
                 material_list=material_list,
                 base_model_type=base_model_type,
                 particle_list=particle_list,
-                LoRA_r=lora_r,
-                LoRA_alpha=lora_alpha
+                LoRA_r=loRA_r,
+                LoRA_alpha=loRA_alpha,
+                enable_head_LoRA=enable_head_LoRA,
+                enable_vocab_LoRA=enable_vocab_LoRA,
+                enable_embedding_adapter=enable_embedding_adapter,
+                vocab_LoRA_scale=vocab_LoRA_scale
                 ).to(args.device)
 
     model_path = config['Inference']['model_path']
@@ -135,9 +142,6 @@ def main(config,args):
 
     model.eval()
 
-    for name, param in model.named_parameters():
-        if "IA3" in name:
-            print(f"Parameter {name} has value: {param.data.cpu().numpy()}")
 
     # for name, param in model.named_parameters():
     #     if "lora" in name:
@@ -163,6 +167,24 @@ def main(config,args):
             particle_type = "gamma"
         else:
             raise ValueError("Unknown particle type in material: ", material)
+
+    for name, param in model.named_parameters():
+        if particle_type in name:
+            print(f"Parameter {name} has value: {param.mean().data.cpu().numpy()}")
+
+    for name, module in model.named_modules():
+        if particle_type in name:
+            if "particle_lora" in name and hasattr(module, 'lora_B_Q'):
+                # (A, B, r, alpha, layer_name, vocab=False):
+                print(f"\n=== SVD Check: {name} ===")
+                singular_value_checks(module.lora_A_Q, module.lora_B_Q, module.lora_r, module.scale, f"{name}.Q")
+                singular_value_checks(module.lora_A_K, module.lora_B_K, module.lora_r, module.scale, f"{name}.K")
+                singular_value_checks(module.lora_A_V, module.lora_B_V, module.lora_r, module.scale, f"{name}.V")
+                singular_value_checks(module.lora_A_c_proj, module.lora_B_c_proj, module.lora_r, module.scale, f"{name}.c_proj")
+
+            elif "vocab_lora" in name and hasattr(module, 'lora_B_vocab'):
+                print(f"\n=== SVD Check: {name} ===")
+                singular_value_checks(module.lora_A_vocab, module.lora_B_vocab, module.lora_r, module.scale, f"{name}", vocab=True)
         
 
     global_e_max = config['stats']['global_energy_max']
@@ -171,7 +193,7 @@ def main(config,args):
     
     # test_files = [twb,tab,tpb]  # for quick testing
     # test_files = [test_files[0],test_files[1],test_files[-2],test_files[-1]]  
-    # test_files = test_files[:1] + test_files[-1:]  # for quick testing
+    # test_files = test_files[:2] + test_files[-2:]  # for quick testing
     # test_files = test_files[:2] # for quick testing
 
     dataset = ECAL_Chunked_Dataset(test_files,max_seq_length=msl,

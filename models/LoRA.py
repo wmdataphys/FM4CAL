@@ -10,14 +10,7 @@ class LoRA(nn.Module):
         self.scale = alpha / math.sqrt(lora_r)
         print(f"Using rank stabilization: scale = {self.scale}")
         print(f"LoRA: embed_dim={embed_dim}, rank={lora_r}, alpha={alpha}, drop_rate={drop_rate}, mlp_scale={mlp_scale}")
-        self.device = device
-
-        # Combine LoRA and IA3
-        self.IA3_K = nn.Parameter(torch.ones(1, 1, embed_dim))
-        self.IA3_V = nn.Parameter(torch.ones(1, 1, embed_dim))
-        
-        # Tuning experts - don't need IA3 for FFN
-        # self.IA3_FF = nn.Parameter(torch.ones(1, 1, embed_dim * mlp_scale))    
+        self.device = device 
 
         # LoRA for Q
         self.lora_A_Q = nn.Parameter(torch.randn(embed_dim, lora_r) * 0.01)
@@ -36,10 +29,6 @@ class LoRA(nn.Module):
         # LoRA for output projection 
         self.lora_A_c_proj = nn.Parameter(torch.randn(embed_dim, lora_r) * 0.01)
         self.lora_B_c_proj = nn.Parameter(torch.zeros(lora_r, embed_dim))
-
-
-    def get_IA3_KV(self,):
-        return self.IA3_K, self.IA3_V
 
     def forward_proj(self, x):
         x_d = self.dropout(x)
@@ -104,12 +93,6 @@ class Vocab_LoRA(nn.Module):
         self.lora_B_vocab = nn.Parameter(torch.zeros(vocab_size, lora_r)) # [V, r]
 
         self.dropout = nn.Dropout(drop_rate) if drop_rate > 0.0 else lambda x: x
-
-        # Hadamard product for vocab adaptation, essentially just IA
-        self.IA3_vocab = nn.Parameter(torch.ones(1,1,vocab_size))  # [1, 1, V]
-
-    def apply_product(self,x):
-        return x * self.IA3_vocab
 
     def forward(self, x):
         x_d = self.dropout(x) # [batch_size, embed_dim]

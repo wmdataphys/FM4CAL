@@ -74,11 +74,10 @@ class CrossAttention(nn.Module):
 
         # Apply LoRA to Q,K if available
         if LoRA_module is not None:
-            IA3_K,IA3_V = LoRA_module.get_IA3_KV()
             delta_Q, delta_K, delta_V = LoRA_module(x,e_embed=e_embed)  # (B, T_new, E)
             q = q + delta_Q
-            k = (k + delta_K) * IA3_K
-            v = (v + delta_V) * IA3_V
+            k = k + delta_K
+            v = v + delta_V
 
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
@@ -251,11 +250,10 @@ class MHSA(nn.Module):
 
         # Apply LoRA to Q,K if available
         if LoRA_module is not None:
-            IA3_K,IA3_V = LoRA_module.get_IA3_KV()
             delta_Q, delta_K, delta_V = LoRA_module(x)  # (B, T_new, E)
             q = q + delta_Q
-            k = (k + delta_K) * IA3_K
-            v = (v + delta_V) * IA3_V
+            k = k + delta_K
+            v = v + delta_V
 
 
         k = k.view(batch_size, T_new, self.num_heads, self.head_dim)
@@ -402,11 +400,15 @@ class ECAL_GPT(nn.Module):
                 detokenize_func=None,
                 use_MoE=False, num_experts: int = 2, material_list: list  = ["G4_W_gamma", "G4_Ta_gamma"],
                 particle_list: list = ["gamma"], base_model_type: str = "gamma",
-                device='cuda',
+                device: str ='cuda',
                 grid_shape=None,
-                LoRA_alpha=64,
-                LoRA_r=32,
-                T_ref=1000.0):
+                LoRA_alpha: int =2,
+                LoRA_r: int =16,
+                enable_head_LoRA: bool = False, # Q,K,V and c_proj in MHSA/CA 
+                enable_vocab_LoRA: bool = False,
+                vocab_LoRA_scale: int = 1, # Scale factor for vocab LoRA rank
+                enable_embedding_adapter = False # Embedding adapter modules for token and energy embeddings
+                ):
         super().__init__()
         self.embed_dim = embed_dim
         self.seq_len = seq_len
@@ -416,8 +418,15 @@ class ECAL_GPT(nn.Module):
         self.drop_rates = drop_rates
         self.use_MoE = use_MoE
         self.base_model_type = base_model_type
+
+        # Fine Tune params
+        self.use_LoRA = enable_head_LoRA or enable_vocab_LoRA
         self.LoRA_alpha = LoRA_alpha
         self.LoRA_r = LoRA_r
+        self.enable_head_LoRA = enable_head_LoRA
+        self.enable_vocab_LoRA = enable_vocab_LoRA
+        self.vocab_LoRA_scale = vocab_LoRA_scale
+        self.enable_embedding_adapter = enable_embedding_adapter
 
         self.material_list = material_list
         self.num_experts = num_experts
@@ -500,23 +509,36 @@ class ECAL_GPT(nn.Module):
         self.vocab_LoRA = {}
         for particle in self.particle_list:
             if particle == self.base_model_type:
-                # Base particle (e.g., gamma): no LoRA
                 self.particle_lora[particle] = [None] * len(self.attn_heads)
-            else:
+                continue
+            
+            # Attention LoRA modules
+            if self.enable_head_LoRA:
                 print(f"Creating LoRA modules for particle type: {particle}. LoRA_r={self.LoRA_r}, LoRA_alpha={self.LoRA_alpha} ")
-                lora_list = nn.ModuleList([
+                self.particle_lora[particle] = nn.ModuleList([
                     LoRA(self.embed_dim, lora_r=self.LoRA_r, alpha=self.LoRA_alpha, drop_rate=self.drop_rates[0], device=self.device)
-                    for _ in range(len(self.attn_heads))])
-                self.particle_lora[particle] = lora_list
+                    for _ in range(len(self.attn_heads))]) 
+            else:
+                self.particle_lora[particle] = [None] * len(self.attn_heads)
 
+            # Vocab LoRA modules or new heads
+            if self.enable_vocab_LoRA:
+                vocab_r = int(self.LoRA_r * self.vocab_LoRA_scale)
+                vocab_alpha = int(self.LoRA_alpha * self.vocab_LoRA_scale)
+                print(f"Creating Vocab LoRA modules for particle type: {particle}. LoRA_r={vocab_r}, LoRA_alpha={vocab_alpha} ")
+                self.vocab_LoRA[particle] = nn.ModuleList([Vocab_LoRA(vocab_size=self.space_vocab, embed_dim=self.embed_dim, lora_r=vocab_r, alpha=vocab_alpha, drop_rate=self.drop_rates[0], device=self.device),
+                                                            Vocab_LoRA(vocab_size=self.energy_vocab, embed_dim=self.embed_dim, lora_r=vocab_r, alpha=vocab_alpha, drop_rate=self.drop_rates[0], device=self.device)])       
+            else:
+                print("Creating new vocab heads for particle type: ", particle)
+                self.vocab_LoRA[particle] = nn.ModuleList([nn.Linear(self.embed_dim, self.space_vocab), nn.Linear(self.embed_dim, self.energy_vocab)])  # Train new heads
+            
+            # Embedding adapter modules
+            if self.enable_embedding_adapter:
                 embedding_adapter_list = nn.ModuleList([
                     ConditionedAdapter(self.embed_dim) for _ in range(2)])  # 2 embedding modules: token and energy
                 self.embedding_adapter[particle] = embedding_adapter_list
 
-                self.vocab_LoRA[particle] = nn.ModuleList([Vocab_LoRA(vocab_size=self.space_vocab, embed_dim=self.embed_dim, lora_r=1*self.LoRA_r, alpha=1*self.LoRA_alpha, drop_rate=self.drop_rates[0], device=self.device),
-                                                          Vocab_LoRA(vocab_size=self.energy_vocab, embed_dim=self.embed_dim, lora_r=1*self.LoRA_r, alpha=1*self.LoRA_alpha, drop_rate=self.drop_rates[0], device=self.device)])
-        
-
+        # Check and register modules 
         for particle, lora_list in self.particle_lora.items():
             if isinstance(lora_list, nn.ModuleList):
                 self.add_module(f"particle_lora_{particle}", lora_list)
@@ -605,17 +627,17 @@ class ECAL_GPT(nn.Module):
         self.lora_newly_created = False
 
         if particle_type not in self.particle_list and particle_type != self.base_model_type:
-            print("Adding new particle type; creating LoRA modules.")
+            print("Adding new particle type; creating fine tuning modules.")
             self.particle_list.append(particle_type)
             self.__build_LoRA_modules()
             self.lora_newly_created = True
 
         elif particle_type in self.particle_list and particle_type != self.base_model_type:
-            print("Existing particle type; reusing LoRA modules.")
+            print("Existing particle type; reusing fine tuning modules.")
             # LoRA modules already loaded into model
             self.lora_newly_created = False
         elif particle_type == self.base_model_type:
-            print("Base particle type; no LoRA modules added.")
+            print("Base particle type; no fine tuning modules added.")
             self.lora_newly_created = False
         else:
             raise ValueError("Unexpected particle type condition.")
@@ -706,6 +728,19 @@ class ECAL_GPT(nn.Module):
 
         print(f"Extended to {self.num_experts} experts for materials: {self.material_list}")
 
+        if self.lora_newly_created and particle_type in self.vocab_LoRA:
+            # Initialize new vocab heads from base model weights
+            print(f"Initializing new vocab heads for new particle type: {particle_type} using base model weights.")
+            if not self.enable_vocab_LoRA:
+                # New linear heads (not Vocab_LoRA objects)
+                with torch.no_grad():
+                    self.vocab_LoRA[particle_type][0].weight.copy_(self.logits_head.weight.data)
+                    self.vocab_LoRA[particle_type][0].bias.copy_(self.logits_head.bias.data)
+                    self.vocab_LoRA[particle_type][1].weight.copy_(self.energy_head.weight.data)
+                    self.vocab_LoRA[particle_type][1].bias.copy_(self.energy_head.bias.data)
+        else:
+            print("Skipping new head initialization.")
+            
 
     def embed_space_tokens(self, idx, pos_idx):
         tok_emb = self.token_embedding(idx)
@@ -781,14 +816,16 @@ class ECAL_GPT(nn.Module):
 
         x = self.LN(x)
 
-        delta_e = self.vocab_LoRA[particle_type][1](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
-        e_out = self.energy_head(x) + delta_e  # logits over time
+        if self.enable_vocab_LoRA: # Should refactor this later such that loRA takes in the base head output and adds to it
+            delta_e = self.vocab_LoRA[particle_type][1](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
+            e_out = self.energy_head(x) + delta_e  # logits over time
 
-        delta_pixel = self.vocab_LoRA[particle_type][0](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
-        pixel = self.logits_head(x) + delta_pixel
-
-        e_out = self.vocab_LoRA[particle_type][1].apply_product(e_out) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else e_out
-        pixel = self.vocab_LoRA[particle_type][0].apply_product(pixel) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else pixel
+            delta_pixel = self.vocab_LoRA[particle_type][0](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
+            pixel = self.logits_head(x) + delta_pixel
+        else:
+            # Just stash the particle heads inside the vocab_LoRA dict for convenience
+            e_out = self.vocab_LoRA[particle_type][1](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.energy_head(x)  
+            pixel = self.vocab_LoRA[particle_type][0](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.logits_head(x)
 
         # Fixed return - fixes potential DDP issues
         return pixel, e_out, load_balance
@@ -902,7 +939,7 @@ class ECAL_GPT(nn.Module):
 
                 # Adjust temperature if dynamic
                 if dynamic_temp:
-                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.15, min_temp=0.975)
+                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.975)
                     #print(f"Step {step}: temperature={temperature:.4f}")
 
                 if use_kv_cache:
@@ -954,17 +991,18 @@ class ECAL_GPT(nn.Module):
                         is_first_step=(step == 0), particle_type=particle_type
                     )
 
-                    delta_pixel = self.vocab_LoRA[particle_type][0](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
-                    pixel_logits = (self.logits_head(h_t)[:, -1, :] + delta_pixel) 
-                    pixel_logits = self.vocab_LoRA[particle_type][0].IA3_vocab.view(1, -1) * pixel_logits if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else pixel_logits
-                    pixel_logits = pixel_logits / temperature
-                    if self.digitize_energy:
+
+                    if self.enable_vocab_LoRA:
+                        delta_pixel = self.vocab_LoRA[particle_type][0](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
+                        pixel_logits = (self.logits_head(h_t)[:, -1, :] + delta_pixel) 
                         delta_e = self.vocab_LoRA[particle_type][1](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
                         energy_logits = (self.energy_head(h_t)[:, -1, :] + delta_e)
-                        energy_logits = self.vocab_LoRA[particle_type][1].IA3_vocab.view(1, -1) * energy_logits if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else energy_logits
+                        pixel_logits = pixel_logits / temperature
                         energy_logits = energy_logits / temperature
                     else:
-                        energy_val = self.energy_head(h_t)[:, -1]
+                        energy_logits = self.vocab_LoRA[particle_type][1](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.energy_head(h_t)[:, -1, :]  
+                        pixel_logits = self.vocab_LoRA[particle_type][0](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.logits_head(h_t)[:, -1, :]
+                        
 
                 else:
                     # NO-CACHE path

@@ -1561,7 +1561,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     voxel_bins = np.arange(0, n_hits, 50)  # The number of hits
     dist_e_bins = np.arange(0, 21, 1)  # The distance
     # bins_cog = np.arange(4, 25, 1.0)  # original - np.arange(8, 22, 0.5)
-    bins_cog = np.arange(8, 22, 0.5)
+    bins_cog = np.arange(5, 22, 0.5)
     bins_z = np.arange(0, 31.5, 1)
 
     # Energy Distribution
