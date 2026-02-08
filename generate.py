@@ -14,7 +14,7 @@ import pkbar
 from datetime import datetime
 import argparse
 
-from plotting import make_plots
+from plotting import make_plots,visualize_vocab_LoRA
 
 from models.GPT import ECAL_GPT
 from dataloader.tokenizer import EnergyTokenizer
@@ -60,6 +60,7 @@ def main(config,args):
     enable_vocab_LoRA = config['model']['enable_vocab_LoRA']
     enable_embedding_adapter = config['model']['enable_embedding_adapter']
     vocab_LoRA_scale = config['model']['vocab_LoRA_scale']
+    use_RoPE = config['model']['use_RoPE']
 
     energy_res = config['stats']['token_energy_res']
     e_max = config['stats']['token_energy_max']
@@ -81,7 +82,7 @@ def main(config,args):
         response = input().strip().lower()
         if response != 'y':
             print("Generation aborted by user, running plotting code only.")
-            make_plots(outfile, energy_digitizer,materials_to_plot=materials_to_generate, num_showers=args.num_showers,material_list=material_list)
+            make_plots(outfile, energy_digitizer,materials_to_plot=materials_to_generate, num_showers=args.num_showers,material_list=material_list,comparison_path=args.comp_paths)
             exit(0)
 
     print("========= Generation Started =========")
@@ -119,7 +120,8 @@ def main(config,args):
                 enable_head_LoRA=enable_head_LoRA,
                 enable_vocab_LoRA=enable_vocab_LoRA,
                 enable_embedding_adapter=enable_embedding_adapter,
-                vocab_LoRA_scale=vocab_LoRA_scale
+                vocab_LoRA_scale=vocab_LoRA_scale,
+                use_RoPE=use_RoPE
                 ).to(args.device)
 
     model_path = config['Inference']['model_path']
@@ -185,6 +187,22 @@ def main(config,args):
             elif "vocab_lora" in name and hasattr(module, 'lora_B_vocab'):
                 print(f"\n=== SVD Check: {name} ===")
                 singular_value_checks(module.lora_A_vocab, module.lora_B_vocab, module.lora_r, module.scale, f"{name}", vocab=True)
+
+                if args.visualize_vocab_LoRA:
+                    if '0' in name:
+                        label = "Pixel"
+                        original_W = model.logits_head.weight.data
+                    elif '1' in name:
+                        label = "Energy"
+                        original_W = model.energy_head.weight.data
+                    else:
+                        label = "Unknown"
+                        print("Unknown vocab LoRA label for visualization. Exiting.")
+                        exit(1)
+
+                    print(f"\n=== Visualizing Vocab LoRA: {name} ===")
+                    visualize_vocab_LoRA(module.lora_A_vocab, module.lora_B_vocab,original_W,label )
+
         
 
     global_e_max = config['stats']['global_energy_max']
@@ -303,7 +321,7 @@ def main(config,args):
 
     print("Generation complete. Output written to: ", outfile)
     print("Generating plots...")
-    make_plots(outfile, energy_digitizer,materials_to_plot=materials_to_generate, num_showers=args.num_showers,material_list=material_list)
+    make_plots(outfile, energy_digitizer,materials_to_plot=materials_to_generate, num_showers=args.num_showers,material_list=material_list,comparison_path=args.comp_paths)
 
 
 class ShowerWriterCompound:
@@ -373,6 +391,8 @@ if __name__ == "__main__":
     parser.add_argument('--materials_to_generate', type=str, nargs='+', default=None, help='List of materials to generate showers for. If not set, generates for all materials in config.')
     parser.add_argument('--temperature', type=float, default=1.0, help='Sampling temperature during generation.')
     parser.add_argument('--dynamic_temp', action='store_true', help='Whether to use dynamic temperature during generation.')
+    parser.add_argument('--visualize_vocab_LoRA', action='store_true', help='Whether to visualize vocab LoRA matrices after loading model.')
+    parser.add_argument('--comp_paths', type=str, nargs='+', default=None, help='Paths to additional models for comparison.')
     args = parser.parse_args()
 
     os.makedirs("Generations", exist_ok=True)

@@ -131,58 +131,95 @@ params_to_update_dark = {
     "savefig.edgecolor": "#1A1D22",
 }
 
-
-def plot_ratios(ax_twin, features_list, bins, feature, labels, colors, mask, weights=None):
-    """Plots ratio plots for each feature compared to the first feature.
-
-    Args:
-        ax_twin (matplotlib.axes.Axes): The twin axis on which to plot the ratios.
-        features_list (list): A list of dictionaries, each containing a feature's data.
-        bins (array-like): The bin edges for the histogram.
-        feature (str): Name of the feature to plot.
-        labels (list): A list of labels for each feature.
-        colors (list): A list of colors for each feature.
-        weights (str, optional): Key for weights in the feature dictionaries. Default is None.
-
-    Returns:
-        None
-    """
-
-    for i in range(1, len(features_list)):  # Compare feature 1 with feature 2 and 3
-        if weights:
-            counts1, _ = np.histogram(
-                features_list[0][feature], bins=bins, weights=features_list[0][weights]
-            )
-            counts2, _ = np.histogram(
-                features_list[i][feature], bins=bins, weights=features_list[i][weights]
-            )
+def plot_ratios(ax_twin, features_list, bins, feature, labels, colors, mask, weights=None, uncertainties=None):
+    """Plots ratio plots for each feature compared to the first feature."""
+    for i in range(1, len(features_list)):
+        if uncertainties is not None:
+            counts1 = np.asarray(features_list[0][weights])
+            counts2 = np.asarray(features_list[i][weights])
+            unc2 = np.asarray(features_list[i][uncertainties])
+            x_vals = (bins[:-1] + bins[1:]) / 2  # ✅ 30 bin centers
+            n = min(len(x_vals), len(counts1), len(counts2), len(unc2))
+            x_vals = x_vals[:n]
+            counts1 = counts1[:n]
+            counts2 = counts2[:n]
+            unc2 = unc2[:n]
+            step_where = "mid"
+        elif weights:
+            counts1, _ = np.histogram(features_list[0][feature], bins=bins, weights=features_list[0][weights])
+            counts2, _ = np.histogram(features_list[i][feature], bins=bins, weights=features_list[i][weights])
+            unc2 = None
+            x_vals = bins  # 31 edges
+            step_where = "post"
         else:
             counts1, _ = np.histogram(features_list[0][feature], bins=bins)
             counts2, _ = np.histogram(features_list[i][feature], bins=bins)
+            unc2 = None
+            x_vals = bins  # 31 edges
+            step_where = "post"
 
         ratios = []
+        ratio_uncertainties = []
         for j in range(len(counts1)):
-            if counts2[j] == 0:
+            if counts1[j] <= 0 or counts2[j] <= 0:
                 ratios.append(np.nan)
+                ratio_uncertainties.append(np.nan)
+                continue
+
+            ratio = counts2[j] / counts1[j]
+            ratios.append(ratio)
+
+            if uncertainties is not None:
+                ratio_uncertainty = unc2[j] / counts1[j]
             else:
-                ratios.append(counts2[j] / counts1[j])
-        linestyle = "--" if i > 1 else "-"
-        ax_twin.step(
-            bins,  # Use all energy bin edges
-            ratios + [ratios[-1]],  # Duplicate last ratio for the step
-            where="post",  # 'post' creates the step after the data point
-            color=colors[i],  # Use color from the current feature
-            label=f"ratio to {labels[i]}",  # Use label from the current feature
-            linestyle=linestyle,  # Use linestyle from the current feature
+                ratio_uncertainty = np.sqrt(counts2[j]) / counts1[j]
+
+            ratio_uncertainties.append(ratio_uncertainty)
+
+        if x_vals.shape[0] == len(ratios) + 1:
+            y_vals = ratios + [ratios[-1]]
+            y_unc = ratio_uncertainties + [ratio_uncertainties[-1]]
+        else:
+            y_vals = ratios
+            y_unc = ratio_uncertainties
+
+        ax_twin.step(x_vals, y_vals, where=step_where, color=colors[i], label=f"ratio to {labels[i]}", linestyle="--" if i > 1 else "-")
+
+        valid_mask = ~np.isnan(ratios)
+        in_bounds_mask = (np.array(ratios) >= mask[0]) & (np.array(ratios) <= mask[1])
+        combined_mask = valid_mask & in_bounds_mask
+
+        if x_vals.shape[0] == len(ratios) + 1:
+            # Extend mask for step plot
+            combined_mask_extended = np.append(combined_mask, combined_mask[-1] if len(combined_mask) > 0 else False)
+            y_vals_filtered = np.array(y_vals)[combined_mask_extended]
+            y_unc_filtered = np.array(y_unc)[combined_mask_extended]
+            x_vals_filtered = x_vals[combined_mask_extended]
+        else:
+            y_vals_filtered = np.array(y_vals)[combined_mask]
+            y_unc_filtered = np.array(y_unc)[combined_mask]
+            x_vals_filtered = x_vals[combined_mask]
+
+        ax_twin.fill_between(
+            x_vals_filtered,
+            y_vals_filtered - y_unc_filtered,
+            y_vals_filtered + y_unc_filtered,
+            step=step_where,
+            alpha=0.3,
+            color=colors[i],
         )
-        bin_centers = (bins[:-1] + bins[1:]) / 2
-        # Add out-of-bounds markers at the edge of the plot
+
+
+        # --- markers for out-of-bounds ---
+        marker_x = (bins[:-1] + bins[1:]) / 2
+        marker_x = marker_x[:len(ratios)]  # ✅ match ratios length
+
         mask_below = np.array(ratios) < mask[0]
         mask_above = np.array(ratios) > mask[1]
 
         ax_twin.plot(
-            bin_centers[mask_below],
-            np.full_like(bin_centers[mask_below], mask[0]),
+            marker_x[mask_below],
+            np.full_like(marker_x[mask_below], mask[0]),
             marker="v",
             color=colors[i],
             markersize=6,
@@ -190,14 +227,99 @@ def plot_ratios(ax_twin, features_list, bins, feature, labels, colors, mask, wei
             linestyle="None",
         )
         ax_twin.plot(
-            bin_centers[mask_above],
-            np.full_like(bin_centers[mask_above], mask[1]),
+            marker_x[mask_above],
+            np.full_like(marker_x[mask_above], mask[1]),
             marker="^",
             color=colors[i],
             markersize=6,
             clip_on=False,
             linestyle="None",
         )
+
+# def plot_ratios(ax_twin, features_list, bins, feature, labels, colors, mask, weights=None, uncertainties=None):
+#     """Plots ratio plots for each feature compared to the first feature."""
+
+#     for i in range(1, len(features_list)):
+#         if uncertainties:
+#             uncertainty2 = features_list[i][uncertainties]
+#         if weights:
+#             # Standard weighted histogram
+#             counts1, _ = np.histogram(
+#                 features_list[0][feature], bins=bins, weights=features_list[0][weights]
+#             )
+#             counts2, _ = np.histogram(
+#                 features_list[i][feature], bins=bins, weights=features_list[i][weights]
+#             )
+#         else:
+#             # Unweighted histogram
+#             counts1, _ = np.histogram(features_list[0][feature], bins=bins)
+#             counts2, _ = np.histogram(features_list[i][feature], bins=bins)
+#             uncertainty2 = None
+
+#         ratios = []
+#         ratio_uncertainties = []
+#         for j in range(len(counts1)):
+#             if counts1[j] < 1e-10 or counts2[j] < 1e-10:
+#                 ratios.append(np.nan)
+#                 ratio_uncertainties.append(np.nan)
+#             else:
+#                 ratio = counts2[j] / counts1[j]
+#                 ratios.append(ratio)
+                
+#                 if uncertainties:
+#                     # Use pre-computed SEM: δ(gen/truth) = SEM / truth
+#                     ratio_uncertainty = uncertainty2[j] / counts1[j]
+#                 else:
+#                     # Use Poisson: δ(gen/truth) = sqrt(gen) / truth
+#                     ratio_uncertainty = np.sqrt(counts2[j]) / counts1[j]
+                
+#                 ratio_uncertainties.append(ratio_uncertainty)
+
+#         linestyle = "--" if i > 1 else "-"
+#         ax_twin.step(
+#             bins,
+#             ratios + [ratios[-1]],
+#             where="post",
+#             color=colors[i],
+#             label=f"ratio to {labels[i]}",
+#             linestyle=linestyle,
+#         )
+
+#         ratios_extended = np.array(ratios + [ratios[-1]])
+#         uncertainties_extended = np.array(ratio_uncertainties + [ratio_uncertainties[-1]])
+
+
+#         ax_twin.fill_between(
+#             bins,
+#             (ratios_extended - uncertainties_extended),
+#             (ratios_extended + uncertainties_extended),
+#             step="post",
+#             alpha=0.3,
+#             color=colors[i],
+#         )
+
+#         bin_centers = (bins[:-1] + bins[1:]) / 2
+#         mask_below = np.array(ratios) < mask[0]
+#         mask_above = np.array(ratios) > mask[1]
+
+#         ax_twin.plot(
+#             bin_centers[mask_below],
+#             np.full_like(bin_centers[mask_below], mask[0]),
+#             marker="v",
+#             color=colors[i],
+#             markersize=6,
+#             clip_on=False,
+#             linestyle="None",
+#         )
+#         ax_twin.plot(
+#             bin_centers[mask_above],
+#             np.full_like(bin_centers[mask_above], mask[1]),
+#             marker="^",
+#             color=colors[i],
+#             markersize=6,
+#             clip_on=False,
+#             linestyle="None",
+#         )
 
 
 
@@ -333,6 +455,31 @@ def sum_energy_per_radial_distance(x: ak.Array, y: ak.Array, energy: ak.Array) -
     binned_energy = ak.Array(result)
     return binned_energy
 
+def sum_energy_per_radial_distance_unc(x: ak.Array, y: ak.Array, energy: ak.Array) -> ak.Array:
+    """Sums up the energy per radial distance bin for each shower.
+
+    Args:
+        radial_distance: Awkward array of radial distances for each point in the shower.
+        energy: Awkward array of energy values for each point in the shower.
+    Returns:
+        Awkward array of summed energy values per radial distance bin for each shower.
+    """
+    x_middle = 14.5
+    y_middle = 14.5
+
+    # Calculate the radial distance from the center
+    radial_distance = ((x - x_middle) ** 2 + (y - y_middle) ** 2) ** 0.5
+    result = []
+    radial_bins = np.arange(0, 22)
+    for radial_shower, energy_shower in zip(radial_distance, energy):
+        # Bin energy values according to radial distance bins
+        hist, _ = np.histogram(radial_shower, bins=radial_bins, weights=energy_shower)
+        result.append(hist)
+    # Convert the result to an awkward array for better handling
+    binned_energy = ak.Array(result)
+    uncertainty = ak.std(binned_energy, axis=0) / np.sqrt(len(result))
+    return uncertainty
+
 
 def sum_energy_per_layer(z: ak.Array, energy: ak.Array) -> ak.Array:
     """Sums up the energy per layer (z-bin) for each shower.
@@ -353,6 +500,27 @@ def sum_energy_per_layer(z: ak.Array, energy: ak.Array) -> ak.Array:
     # Convert the result to an awkward array for better handling
     binned_energy = ak.Array(result)
     return binned_energy
+
+def sum_energy_per_layer_unc(z: ak.Array, energy: ak.Array) -> ak.Array:
+    """Sums up the energy per layer (z-bin) for each shower.
+
+    Args:
+        z: Awkward array of z-coordinates for each point in the shower.
+        energy: Awkward array of energy values for each point in the shower.
+        z_bins: Array of z-bin edges.
+    Returns:
+        Awkward array of summed energy values per z-bin for each shower.
+    """
+    result = []
+    z_bins = np.arange(0, 30)
+    for z_shower, energy_shower in zip(z, energy):
+        # Bin energy values according to Z-bins
+        hist, _ = np.histogram(z_shower, bins=z_bins, weights=energy_shower)
+        result.append(hist)
+    # Convert the result to an awkward array for better handling
+    binned_energy = ak.Array(result)
+    uncertainty = ak.std(binned_energy, axis=0) / np.sqrt(len(result))
+    return uncertainty
 
 
 def write_distances_to_json(kld, wasserstein, filepath, weights, n_data, feature):
@@ -767,69 +935,102 @@ def save_subplot(
     fig.savefig(saveas, bbox_inches=bbox.expanded(expanded_x, expanded_y))
 
 
-def plot_ratios(ax_twin, features_list, bins, feature, labels, colors, mask, weights=None):
-    """Plots ratio plots for each feature compared to the first feature.
+def read_and_filter_energies(comp_path,min_threshold=1e-15,max_threshold=35.0):
+    ak_array = ak.from_parquet(comp_path)
+    energies = ak_array["energy"]
+    x = ak_array['x']
+    y = ak_array['y']
+    z = ak_array['z']
 
-    Args:
-        ax_twin (matplotlib.axes.Axes): The twin axis on which to plot the ratios.
-        features_list (list): A list of dictionaries, each containing a feature's data.
-        bins (array-like): The bin edges for the histogram.
-        feature (str): Name of the feature to plot.
-        labels (list): A list of labels for each feature.
-        colors (list): A list of colors for each feature.
-        weights (str, optional): Key for weights in the feature dictionaries. Default is None.
+    mask = (energies >= min_threshold) & (energies <= max_threshold)
+    filtered_energies = energies[mask]
+    filtered_x = x[mask]
+    filtered_y = y[mask]
+    filtered_z = z[mask]
 
-    Returns:
-        None
-    """
+    return ak.Array({"energy": filtered_energies,"x": filtered_x, "y": filtered_y, "z": filtered_z})
 
-    for i in range(1, len(features_list)):  # Compare feature 1 with feature 2 and 3
-        if weights:
-            counts1, _ = np.histogram(
-                features_list[0][feature], bins=bins, weights=features_list[0][weights]
-            )
-            counts2, _ = np.histogram(
-                features_list[i][feature], bins=bins, weights=features_list[i][weights]
-            )
-        else:
-            counts1, _ = np.histogram(features_list[0][feature], bins=bins)
-            counts2, _ = np.histogram(features_list[i][feature], bins=bins)
 
-        ratios = []
-        for j in range(len(counts1)):
-            if counts2[j] == 0:
-                ratios.append(np.nan)
-            else:
-                ratios.append(counts2[j] / counts1[j])
-        linestyle = "--" if i > 1 else "-"
-        ax_twin.step(
-            bins,  # Use all energy bin edges
-            ratios + [ratios[-1]],  # Duplicate last ratio for the step
-            where="post",  # 'post' creates the step after the data point
-            color=colors[i],  # Use color from the current feature
-            label=f"ratio to {labels[i]}",  # Use label from the current feature
-            linestyle=linestyle,  # Use linestyle from the current feature
-        )
-        bin_centers = (bins[:-1] + bins[1:]) / 2
-        # Add out-of-bounds markers at the edge of the plot
-        mask_below = np.array(ratios) < mask[0]
-        mask_above = np.array(ratios) > mask[1]
+# def plot_ratios(ax_twin, features_list, bins, feature, labels, colors, mask, weights=None):
+#     """Plots ratio plots for each feature compared to the first feature.
 
-        ax_twin.plot(
-            bin_centers[mask_below],
-            np.full_like(bin_centers[mask_below], mask[0]),
-            marker="v",
-            color=colors[i],
-            markersize=6,
-            clip_on=False,
-            linestyle="None",
-        )
-        ax_twin.plot(
-            bin_centers[mask_above],
-            np.full_like(bin_centers[mask_above], mask[1]),
-            marker="^",
-            color=colors[i],
-            markersize=6,
-            clip_on=False,
-            linestyle="None",
-        )
+#     Args:
+#         ax_twin (matplotlib.axes.Axes): The twin axis on which to plot the ratios.
+#         features_list (list): A list of dictionaries, each containing a feature's data.
+#         bins (array-like): The bin edges for the histogram.
+#         feature (str): Name of the feature to plot.
+#         labels (list): A list of labels for each feature.
+#         colors (list): A list of colors for each feature.
+#         weights (str, optional): Key for weights in the feature dictionaries. Default is None.
+
+#     Returns:
+#         None
+#     """
+
+#     for i in range(1, len(features_list)):  # Compare feature 1 with feature 2 and 3
+#         if weights:
+#             counts1, _ = np.histogram(
+#                 features_list[0][feature], bins=bins, weights=features_list[0][weights]
+#             )
+#             counts2, _ = np.histogram(
+#                 features_list[i][feature], bins=bins, weights=features_list[i][weights]
+#             )
+#         else:
+#             counts1, _ = np.histogram(features_list[0][feature], bins=bins)
+#             counts2, _ = np.histogram(features_list[i][feature], bins=bins)
+
+#         ratios = []
+#         ratio_uncertainties = []
+#         for j in range(len(counts1)):
+#             if counts2[j] == 0:
+#                 ratios.append(np.nan)
+#                 ratio_uncertainties.append(0)
+#             else:
+#                 # Gen / True -> sigma(gen) / true 
+#                 ratios.append(counts2[j] / counts1[j])
+#                 # Propagate uncertainties assuming Poisson statistics
+#                 ratio_uncertainty = np.sqrt(counts2[j]) / counts1[j]
+#                 ratio_uncertainties.append(ratio_uncertainty)
+
+
+#         linestyle = "--" if i > 1 else "-"
+#         ax_twin.step(
+#             bins,  # Use all energy bin edges
+#             ratios + [ratios[-1]],  # Duplicate last ratio for the step
+#             where="post",  # 'post' creates the step after the data point
+#             color=colors[i],  # Use color from the current feature
+#             label=f"ratio to {labels[i]}",  # Use label from the current feature
+#             linestyle=linestyle,  # Use linestyle from the current feature
+#         )
+
+#         ax_twin.fill_between(
+#             bins,
+#             np.array(ratios + [ratios[-1]]) - np.array(ratio_uncertainties + [ratio_uncertainties[-1]]),
+#             np.array(ratios + [ratios[-1]]) + np.array(ratio_uncertainties + [ratio_uncertainties[-1]]),
+#             step="mid",
+#             alpha=0.3,
+#         )
+
+#         bin_centers = (bins[:-1] + bins[1:]) / 2
+#         # Add out-of-bounds markers at the edge of the plot
+#         mask_below = np.array(ratios) < mask[0]
+#         mask_above = np.array(ratios) > mask[1]
+
+#         ax_twin.plot(
+#             bin_centers[mask_below],
+#             np.full_like(bin_centers[mask_below], mask[0]),
+#             marker="v",
+#             color=colors[i],
+#             markersize=6,
+#             clip_on=False,
+#             linestyle="None",
+#         )
+#         ax_twin.plot(
+#             bin_centers[mask_above],
+#             np.full_like(bin_centers[mask_above], mask[1]),
+#             marker="^",
+#             color=colors[i],
+#             markersize=6,
+#             clip_on=False,
+#             linestyle="None",
+#         )

@@ -3,8 +3,8 @@
   "seed": 42,
   "digitize_energy": true,
   "use_amp": true,
-  "material_list": ["G4_W_gamma", "G4_Ta_gamma","G4_W_e-"],
-  "particle_list": ["gamma","e-"],
+  "material_list": ["G4_W_gamma", "G4_Ta_gamma"],
+  "particle_list": ["gamma"],
   "base_model_type": "gamma",
   "output": {
     "dir": "/sciclone/data10/jgiroux/ECAL_Cole/ECAL_Models"
@@ -30,8 +30,8 @@
     },
     "testing": {
       "G4_Pb_gamma_test_files": "data/1MillSim/Pb_Files_test.txt",
-      "G4_W_gamma_test_files_": "data/1MillSim/W_Files_test.txt",
-      "G4_W_gamma_test_files": "data/1MillSim/W_Gamma_20GeV_Files.txt",
+      "G4_W_gamma_test_files": "data/1MillSim/W_Files_test.txt",
+      "G4_W_gamma_test_files_": "data/1MillSim/W_Gamma_20GeV_Files.txt",
       "G4_Ta_gamma_test_files": "data/1MillSim/Ta_Files_test.txt",
       "G4_Pb_e-_test_files": "data/1MillSim/Pb_Electron_Files_test.txt",
       "G4_W_e-_test_files": "data/1MillSim/W_Electron_Files_test.txt",
@@ -62,7 +62,8 @@
     "enable_head_LoRA": false,
     "enable_vocab_LoRA": false,
     "enable_embedding_adapter": false,
-    "vocab_LoRA_scale": 16
+    "vocab_LoRA_scale": 16,
+    "use_RoPE": false
   },
   "stats": {
     "global_energy_max": 100.0,
@@ -72,9 +73,10 @@
     "token_energy_res": 0.0014
   },
   "optimizer": {
-    "lr": 0.0001,
-    "lr_cls": 0.001,
-    "weight_decay": 0.01,
+    "lr": 0.001,
+    "lr_ft": 0.0001,
+    "decay_vocab": 0.1,
+    "decay_else": 0.0,
     "alpha": 0.001
   },
   "num_epochs": 100,
@@ -100,12 +102,22 @@
         }
   },
   "Inference": {
-    "model_path": "Trained_Models/W_Electron_FullRsLoRA_Rank8_16xVocabHeads_EmbedAdapters_FineTune___Jan-27-2026/Epoch08_loss_9.893183.pth",
-    "model_path_": "Trained_Models/W_Electron_VocabHeads_FineTune___Jan-27-2026/Epoch10_loss_9.982401.pth",
+    "model_path_": "Trained_Models/Restart_RoPE_Model___Feb-04-2026/Epoch10_loss_9.671391.pth",
+    "model_path": "Trained_Models/Restart_APE_Model___Feb-04-2026/Epoch10_loss_9.690241.pth",
+    "final_models_above": true,
+    "model_path_": "Trained_Models/W_Electron_RandomInit_VocabHeads_EmbAdapters_LowRankLoRA_r8_alpha2_BaseLRDecay_16xVocab_Div4VocabScale_WeightDecay_FineTune_InitLR1e3___Jan-31-2026/Epoch07_loss_9.893150.pth",
+    "model_path_": "Trained_Models/W_Electron_NO_PissaInit_VocabHeads_EmbAdapters_LowRankLoRA_r8_alpha2_BaseLRDecay_16xVocab_WeightDecay_FineTune_InitLR1e3___Jan-31-2026/Epoch12_loss_9.892283.pth",
+    "model_path_": "Trained_Models/W_Electron_PissaInit_VocabHeads_EmbAdapters_LowRankLoRA_r8_alpha2_BaseLRDecay_16xVocab_WeightDecay_FineTune_InitLR1e3___Jan-31-2026/Epoch12_loss_9.890337.pth",
+    "model_path_": "Trained_Models/W_Electron_VocabHeads_EmbAdapters_LowRankLoRA_r8_alpha2_FastLRDecay_16xVocab_10xWeightDecay_FineTune___Jan-29-2026/Epoch06_loss_9.901054.pth",
+    "model_path_": "Trained_Models/W_Electron_VocabHeads_EmbAdapters_LowRankLoRA_r8_alpha2_FastLRDecay_16xVocab_5xWeightDecay_FineTune___Jan-29-2026/Epoch08_loss_9.895228.pth",
+    "model_path_": "Trained_Models/W_Electron_VocabHeads_EmbAdapters_LowRankLoRA_r8_alpha2_16xVocab_WeightDecay_FineTune___Jan-28-2026/Epoch16_loss_9.891846.pth",
+    "model_path_": "Trained_Models/W_Electron_VocabHeads_EmbAdapters_LowRankLoRA_r8_alpha2_ScaleVocabAlphaDownBy2_FineTune___Jan-28-2026/Epoch05_loss_9.893331.pth",
+    "model_path_": "Trained_Models/W_Electron_FullRsLoRA_Rank8_16xVocabHeads_EmbedAdapters_FineTune___Jan-27-2026/Epoch08_loss_9.893183.pth",
+    "model_path_": "Trained_Models/W_Electron_VocabHeads_FineTune___Jan-27-2026/Epoch15_loss_9.980941.pth",
     "model_path_": "Trained_Models/NoQKNorm_W_Electron_FineTune_rsLoRA_r16_alpha32_IA3_DualVocab_EntropyScaler___Jan-27-2026/Epoch02_loss_9.922524.pth",
     "model_path_": "Trained_Models/NoQKNorm_W_Electron_FineTune_rsLoRA_r16_alpha32_IA3_DualVocab_ParticleScaler___Jan-26-2026/Epoch00_loss_9.947934.pth",
     "model_path_": "Trained_Models/NoQKNorm_W_Electron_FineTune_rsLoRA_r16_alpha32_IA3_DualVocab___Jan-25-2026/Epoch04_loss_9.916427.pth",
-    "model_path_": "Trained_Models/NoQKNorm_W_Ta_gamma_FixBatchCounting_RESUME___Jan-24-2026/Epoch07_loss_9.694418.pth",
+    "model_path_": "Trained_Models_old/NoQKNorm_W_Ta_gamma_FixBatchCounting_RESUME___Jan-24-2026/Epoch07_loss_9.694418.pth",
     "blow_isqknorm": true,
     "model_path_": "Trained_Models/IA3_Embedding_Adapter_DualVocab_4xVocab_Rank8_Alpha_16_e-___Jan-21-2026/Epoch07_loss_9.908888.pth",
     "model_path_": "Trained_Models/IA3_Embedding_Adapter_DualVocab_Rank8_Alpha_16_e-___Jan-21-2026/Epoch18_loss_9.928646.pth",
@@ -119,8 +131,12 @@
     "model_path_": "Trained_Models/FineTuning_W_Ta_with_Pb_V1___Dec-26-2025/Epoch07_loss_9.960306.pth",
     "model_path_256": "Trained_Models/25MeVTokens_256Embed_NoMatEmbedding_EnergyOrder___Dec-18-2025/Epoch16_loss_9.931702.pth",
     "model_path_384": "Trained_Models/25MeVTokens_384Embed_NoMatEmbedding_EnergyOrder___Dec-19-2025/Epoch07_loss_9.914091.pth",
-    "output_file": "FullRsLoRA_Epoch08_G4_W_e-_FullData.h5",
-    "output_file_": "FullVocabHeads_Epoch10_FullData.h5",
+    "output_file": "Restart_APE_Model_Epoch10_LinDyn0935_105.h5",
+    "output_file_": "NO_PiSSA_Init_AdamW_Epoch12_Gamma.h5",
+    "output_file_": "PiSSA_Init_AdamW_WeightDecay_RedcueScale_Epoch16_FullData.h5",
+    "output_file_": "FullRsLoRA_Epoch06_G4_W_e-_FullData.h5",
+    "output_file_": "FullVocabHeads_Epoch15_FullData.h5",
+    "output_file_": "Test_NoCut.h5",
     "batch_size": 2500,
     "num_workers": 0,
     "initial_energy_min": 10.0,

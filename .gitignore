@@ -45,7 +45,7 @@ outputs/
 models/GPT_orig.py
 
 # Ignore model weights
-Trained_Models/
+*Trained_Models*
 
 # Ignore notebook folders
 notebooks/
@@ -62,6 +62,8 @@ notebook/
 ECALGPT_generated/
 val/
 *.pth
+Comparisons/
+
 
 # --- Local scripts & data ---
 init_e_collect.py

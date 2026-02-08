@@ -32,7 +32,7 @@ import torch.distributed as dist
 warnings.filterwarnings("ignore", message=".*weights_only.*")
 
 
-def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma','G4_Ta_gamma'],material_to_add=None,closest_expert=None,base_particle_list=None,particle_type=None):
+def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma','G4_Ta_gamma'],material_to_add=None,closest_expert=None,base_particle_list=None,particle_type=None,enable_pissa=False):
 
     assert material_to_add is not None, "Material to add for fine-tuning must be specified."
 
@@ -56,6 +56,7 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
     enable_vocab_LoRA = config['model']['enable_vocab_LoRA']
     enable_embedding_adapter = config['model']['enable_embedding_adapter']
     vocab_LoRA_scale = config['model']['vocab_LoRA_scale']
+    use_RoPE = config['model']['use_RoPE']
 
     if fine_tune_path is not None:
         print("Loading pre-trained model from: ", fine_tune_path)
@@ -87,7 +88,8 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
                 enable_head_LoRA=enable_head_LoRA,
                 enable_vocab_LoRA=enable_vocab_LoRA,
                 enable_embedding_adapter=enable_embedding_adapter,
-                vocab_LoRA_scale=vocab_LoRA_scale,)
+                vocab_LoRA_scale=vocab_LoRA_scale,
+                use_RoPE=use_RoPE)
                 # Base model - This is what we have trained on first, ever
                 # If we fine tune from W_gamma -> W_e-, then base_model_type='gamma' but base_particle_list=['gamma','e-']
                 # So model knows for e- to use LoRA + experts for e- and just experts for gamma if we fine tune to say G4_Pb_gamma
@@ -96,9 +98,16 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
         print("Loding state dict into model...")
         net.load_state_dict(state_dict,strict=False)
 
+    if enable_pissa:
+        print("Using PiSSA weight initialization for vocab LoRA modules.")
+
+
+    weights = {"logits_head": net.logits_head.weight.data,
+                    "energy_head": net.energy_head.weight.data}
+
 
     experts_per_class = net.num_experts // len(default_material_list)
-    net.extend_model(materials_list + [material_to_add], closest_expert=closest_expert, particle_type=particle_type)
+    net.extend_model(materials_list + [material_to_add], closest_expert=closest_expert, particle_type=particle_type, weights=weights, pissa_init=enable_pissa)
 
     print("\n========= New Expert Weight Check =========")
     for layer_idx, layer in enumerate(net.layers):
@@ -194,11 +203,30 @@ class Trainer:
         self.energy_ce = nn.CrossEntropyLoss(ignore_index=self.energy_pad_token) if self.digitize_energy else None
         self.energy_loss_fn = None  # you’ll need to define this or import it
 
-        self.optimizer = torch.optim.RAdam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=float(config['optimizer']['lr']))
+        vocab_lora_params = []
+        other_params = []
+
+        for name, param in self.model.named_parameters():
+            if 'vocab_lora' in name and param.requires_grad:
+                vocab_lora_params.append(param)
+            elif param.requires_grad:
+                other_params.append(param)
+            else:
+                pass  # Frozen parameters
+
+        self.optimizer = torch.optim.AdamW([
+            {'params': vocab_lora_params, 'weight_decay': config['optimizer']['decay_vocab']},  
+            {'params': other_params, 'weight_decay': config['optimizer']['decay_else']}         
+        ], lr=float(config['optimizer']['lr_ft']))
+
+        if self.rank == 0:
+            print("\n========= Optimizer Parameter Groups =========")
+            print(f"Vocab LoRA params: {sum(p.numel() for p in vocab_lora_params):,} parameters with weight decay {config['optimizer']['decay_vocab']}")
+            print(f"Other trainable params: {sum(p.numel() for p in other_params):,} parameters with weight decay {config['optimizer']['decay_else']}")
+            print("=============================================\n")
+
         self.num_epochs = config['num_epochs']
-        # Decrease LR at epoch 1,10,50,75% of total epochs
-        # LR goes like Epoch 0:1e-3 -> Epoch 1:1e-4 -> Epoch 50:1e-5 -> Epoch 75:1e-6
-        milestones = [5,int(0.1 * self.num_epochs), int(0.5 * self.num_epochs), int(0.75 * self.num_epochs)]
+        milestones = [5,10,15,20] 
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=milestones,gamma=0.1)
         print("Using LR Scheduler with milestones at epochs: ", milestones)
         self.history = {'train_loss': [], 'val_loss': []}
@@ -244,7 +272,7 @@ class Trainer:
             print(f"Experts per class: {experts_per_class}")
             print(f"New expert indices: [{new_expert_start_idx}, {new_expert_end_idx})")
             print(f"Base particle: {model.base_model_type} | Fine-tune particle: {self.particle_type}")
-            print(f"Use LoRA: {use_lora} | LoRA exists (will freeze): {lora_exists}")
+            print(f"Use LoRA: {use_lora} | LoRA exists (will freeze): {lora_exists and use_lora}")
             print(f"============================================\n")
 
         frozen_params = 0
@@ -304,6 +332,7 @@ class Trainer:
                 trainable_params += param.numel()
             else:
                 frozen_params += param.numel()
+                
         
         if self.rank == 0:
             print(f"\n========= Parameter Freeze Status =========")
@@ -490,7 +519,7 @@ class Trainer:
             }, filename)
 
 def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tune_path=None, default_material_list=None, material_to_add=None, closest_expert=None, run_val=True, write_path=None, checkpoint=None,
-               base_particle_list=["gamma"], particle_type='gamma'):
+               base_particle_list=["gamma"], particle_type='gamma', enable_pissa=False):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
@@ -511,7 +540,7 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tu
 
     print(f"Rank {rank} - Starting training with {num_files} files, chunk size: {chunk_size}, num epochs: {num_epochs}")
 
-    model = create_model(config, fine_tune_path=fine_tune_path, default_material_list=default_material_list, material_to_add=material_to_add, closest_expert=closest_expert, base_particle_list=base_particle_list, particle_type=particle_type)
+    model = create_model(config, fine_tune_path=fine_tune_path, default_material_list=default_material_list, material_to_add=material_to_add, closest_expert=closest_expert, base_particle_list=base_particle_list, particle_type=particle_type,enable_pissa=enable_pissa)
     trainer = Trainer(config, rank, world_size, model, default_material_list=default_material_list, material_to_add=material_to_add, particle_type=particle_type)
 
     if checkpoint is not None:
@@ -627,7 +656,8 @@ def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_pat
                material_to_add=material_to_add,
                closest_expert=closest_expert,
                base_particle_list=base_particle_list,
-               particle_type=particle_type)
+               particle_type=particle_type,
+               enable_pissa=args.enable_pissa)
 
 if __name__=='__main__':
     # PARSE THE ARGS
@@ -645,6 +675,8 @@ if __name__=='__main__':
                         help='Path to the pre-trained model checkpoint for fine-tuning')
     parser.add_argument('--closest_expert', type=str, default=None,
                         help='Closest expert material to initialize new expert from (e.g., "G4_Ta_gamma")')
+    parser.add_argument('--enable_pissa', action='store_true',
+                        help='Enable PiSSA weight initialization for vocab LoRA modules.')
     args = parser.parse_args()
 
     config = json.load(open(args.config))

@@ -25,7 +25,7 @@ from dataloader.tokenizer import EnergyTokenizer
 from dataloader.dataset import ECAL_Chunked_Dataset
 from dataloader.dataloader import CreateLoaderMoE
 
-from models.GPT import ECAL_GPT
+from models.GPT_RoPE import ECAL_GPT
 import torch.multiprocessing as mp
 import torch.distributed as dist
 
@@ -33,7 +33,6 @@ warnings.filterwarnings("ignore", message=".*weights_only.*")
 
 
 def create_model(config,state_dict=None):
-    # Model params.
     # Model params.
     vocab_size = config['model']['vocab_size']
     energy_vocab = config['model']['energy_vocab']
@@ -48,6 +47,7 @@ def create_model(config,state_dict=None):
     num_experts = len(materials_list)
     use_MoE = config['model']['use_MoE']
     digitize_energy = config['digitize_energy']
+    use_RoPE = config['model']['use_RoPE']
     
     net = ECAL_GPT(vocab_size,
                    msl,
@@ -61,7 +61,8 @@ def create_model(config,state_dict=None):
                 drop_rates=drop_rates,
                 use_MoE=use_MoE,
                 num_experts=num_experts,
-                material_list=materials_list)
+                material_list=materials_list,
+                use_RoPE=use_RoPE)
                 
     if state_dict:
         net.load_state_dict(state_dict)
@@ -112,7 +113,7 @@ class Trainer:
         self.num_epochs = config['num_epochs']
         # Decrease LR at epoch 1,10,50,75% of total epochs
         # LR goes like Epoch 0:1e-3 -> Epoch 1:1e-4 -> Epoch 50:1e-5 -> Epoch 75:1e-6
-        milestones = [5,int(0.1 * self.num_epochs), int(0.5 * self.num_epochs), int(0.75 * self.num_epochs)]
+        milestones = [5,10,15,20]
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=milestones,gamma=0.1)
         print("Using LR Scheduler with milestones at epochs: ", milestones)
         self.history = {'train_loss': [], 'val_loss': []}
@@ -340,7 +341,7 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, state_d
             print(f"Rank {rank} - Loaded model state from checkpoint.")
         if 'optimizer' in checkpoint:
             trainer.optimizer.load_state_dict(checkpoint['optimizer'])
-            trainer.epoch = checkpoint.get('epoch', 0)
+            trainer.epoch = checkpoint.get('epoch', -1) + 1  # Start from the next epoch
             trainer.history = checkpoint.get('history', trainer.history)
             trainer.global_step = checkpoint.get('global_step', 0)
             print(f"Rank {rank} - Loaded optimizer state from checkpoint, starting at epoch {trainer.epoch}.")

@@ -13,6 +13,8 @@ from torch.nn import functional as F
 from torch.nn.functional import scaled_dot_product_attention as sdpa
 import math
 
+from rotary_embedding_torch import RotaryEmbedding
+
 torch.backends.cuda.enable_flash_sdp(True)         # use FlashAttention when possible
 torch.backends.cuda.enable_mem_efficient_sdp(True) # fallback fused kernel
 torch.backends.cuda.enable_math_sdp(False)         # prefer the fast paths
@@ -61,7 +63,7 @@ class CrossAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, e_embed, attn_mask=None, key_padding_mask=None,
-                need_weights=False, past_kv=None, LoRA_module=None):
+                need_weights=False, past_kv=None, rope=None, LoRA_module=None):
         """
         x:         [B, T_new, E]
         e_embed:   [B, T_new, E]
@@ -86,6 +88,17 @@ class CrossAttention(nn.Module):
         k = k.transpose(1, 2)  # [B, H, T_new, D]
         q = q.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        if rope is not None:
+            if past_kv is None:
+                # First step: no offset needed
+                q = rope.rotate_queries_or_keys(q)
+                k = rope.rotate_queries_or_keys(k)
+            else:
+                # Subsequent steps: offset = cached sequence length
+                offset = past_kv['seq_len']
+                q = rope.rotate_queries_or_keys(q, offset=offset)
+                k = rope.rotate_queries_or_keys(k, offset=offset)
 
         # Normalize Q and K
         if self.qk_norm:
@@ -185,7 +198,7 @@ class CATransformerBlock(nn.Module):
                 material_index,
                 padding_mask=None,
                 need_weights=False,
-                past_kv=None, LoRA_module=None):
+                past_kv=None, rope=None, LoRA_module=None):
         B, N_t, t_dim = x.shape
 
         x_norm = self.xN(x)
@@ -201,6 +214,7 @@ class CATransformerBlock(nn.Module):
                                     key_padding_mask=padding_mask,
                                     attn_mask=mask_,
                                     past_kv=past_kv,
+                                    rope=rope,
                                     LoRA_module=LoRA_module)
 
         delta_proj = LoRA_module.forward_proj(attn_out) if LoRA_module is not None else 0.0
@@ -238,7 +252,7 @@ class MHSA(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, attn_mask=None, key_padding_mask=None,
-                need_weights=False, past_kv=None, LoRA_module=None):
+                need_weights=False, past_kv=None, rope=None, LoRA_module=None):
         """
         x: [B, T_new, E]
         past_kv: Dict with {'k': cache_k, 'v': cache_v, 'seq_len': int} or None
@@ -263,6 +277,17 @@ class MHSA(nn.Module):
         k = k.transpose(1, 2)  # [B, H, T_new, D]
         q = q.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        if rope is not None:
+            if past_kv is None:
+                # First step: no offset needed
+                q = rope.rotate_queries_or_keys(q)
+                k = rope.rotate_queries_or_keys(k)
+            else:
+                # Subsequent steps: offset = cached sequence length
+                offset = past_kv['seq_len']
+                q = rope.rotate_queries_or_keys(q, offset=offset)
+                k = rope.rotate_queries_or_keys(k, offset=offset)
 
         # Normalize Q and K
         if self.qk_norm:
@@ -354,6 +379,7 @@ class TransformerBlock(nn.Module):
                 padding_mask=None,
                 need_weights=False,
                 past_kv=None,
+                rope=None,
                 LoRA_module=None):
         B, N_t, t_dim = x.shape
         x_norm = self.LN1(x)
@@ -367,7 +393,7 @@ class TransformerBlock(nn.Module):
                                 key_padding_mask=padding_mask,
                                 need_weights=need_weights,
                                 attn_mask=mask_,
-                                past_kv=past_kv, LoRA_module=LoRA_module)
+                                past_kv=past_kv, rope=rope, LoRA_module=LoRA_module)
 
         delta_proj = LoRA_module.forward_proj(attn_out) if LoRA_module is not None else 0.0
         attn_out = self.c_proj(attn_out) + delta_proj
@@ -407,7 +433,8 @@ class ECAL_GPT(nn.Module):
                 enable_head_LoRA: bool = False, # Q,K,V and c_proj in MHSA/CA 
                 enable_vocab_LoRA: bool = False,
                 vocab_LoRA_scale: int = 1, # Scale factor for vocab LoRA rank
-                enable_embedding_adapter = False # Embedding adapter modules for token and energy embeddings
+                enable_embedding_adapter = False, # Embedding adapter modules for token and energy embeddings
+                use_RoPE: bool = True,
                 ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -442,18 +469,31 @@ class ECAL_GPT(nn.Module):
         self.digitize_energy = digitize_energy
         self.detokenize_func = detokenize_func
         self.token_embedding = nn.Embedding(vocab_size, embed_dim)
-        self.pos_embedding = nn.Embedding(seq_len, embed_dim)
-        self.energy_pos_embedding = nn.Embedding(seq_len, embed_dim)
         self.initial_energy_embedding = nn.Linear(1, embed_dim)
         self.LN = nn.LayerNorm(embed_dim)
         self.energy_embedding = nn.Embedding(energy_vocab, embed_dim)
         self.energy_head = nn.Linear(embed_dim, energy_vocab)
         self.logits_head = nn.Linear(embed_dim, vocab_size)
-        print("Not using material embeddings.")
+
         #self.material_embedding = nn.Embedding(self.num_classes, embed_dim)
         self.device = device
         self.space_vocab = space_vocab
         self.energy_vocab = energy_vocab
+        self.use_RoPE = use_RoPE
+
+        if not self.use_RoPE:
+            print("Not using RoPE.")
+            self.rope = None
+            self.pos_embedding = nn.Embedding(seq_len, embed_dim)
+            self.energy_pos_embedding = nn.Embedding(seq_len, embed_dim)
+            print(self.rope)
+        else:
+            print("Using RoPE. Theta=1000")
+            self.rope = RotaryEmbedding(dim = self.embed_dim // self.attn_heads[0],
+                                        cache_max_seq_len = self.seq_len, # 2100
+                                        cache_if_possible = True,
+                                        theta = 1000)
+            print(self.rope)
 
         # Add in 3D positional embeddings if provided
         self.grid_shape = grid_shape
@@ -503,7 +543,7 @@ class ECAL_GPT(nn.Module):
         self.EOS_energy_token = energy_vocab - 2  
         self.energy_pad_token = energy_vocab - 1 
 
-    def __build_LoRA_modules(self,energy_vocab=False):
+    def __build_LoRA_modules(self,weights=None,pissa_init=False):
         self.embedding_adapter = {}
         self.particle_lora = {} 
         self.vocab_LoRA = {}
@@ -524,10 +564,12 @@ class ECAL_GPT(nn.Module):
             # Vocab LoRA modules or new heads
             if self.enable_vocab_LoRA:
                 vocab_r = int(self.LoRA_r * self.vocab_LoRA_scale)
-                vocab_alpha = int(self.LoRA_alpha * self.vocab_LoRA_scale)
-                print(f"Creating Vocab LoRA modules for particle type: {particle}. LoRA_r={vocab_r}, LoRA_alpha={vocab_alpha} ")
-                self.vocab_LoRA[particle] = nn.ModuleList([Vocab_LoRA(vocab_size=self.space_vocab, embed_dim=self.embed_dim, lora_r=vocab_r, alpha=vocab_alpha, drop_rate=self.drop_rates[0], device=self.device),
-                                                            Vocab_LoRA(vocab_size=self.energy_vocab, embed_dim=self.embed_dim, lora_r=vocab_r, alpha=vocab_alpha, drop_rate=self.drop_rates[0], device=self.device)])       
+                vocab_alpha = int(self.LoRA_alpha * self.vocab_LoRA_scale / 4)
+                print(f"Creating Vocab LoRA modules for particle type: {particle}. LoRA_r={vocab_r}, LoRA_alpha={vocab_alpha}, vocab_LoRA_scale={vocab_alpha/np.sqrt(vocab_r)} ")
+                pixel_weight = weights['logits_head'] if weights else None
+                energy_weight = weights['energy_head'] if weights else None
+                self.vocab_LoRA[particle] = nn.ModuleList([Vocab_LoRA(vocab_size=self.space_vocab, embed_dim=self.embed_dim, lora_r=vocab_r, weight=pixel_weight, alpha=vocab_alpha, drop_rate=self.drop_rates[0], device=self.device, pissa_init=pissa_init),
+                                                            Vocab_LoRA(vocab_size=self.energy_vocab, embed_dim=self.embed_dim, lora_r=vocab_r, weight=energy_weight, alpha=vocab_alpha, drop_rate=self.drop_rates[0], device=self.device, pissa_init=pissa_init)])       
             else:
                 print("Creating new vocab heads for particle type: ", particle)
                 self.vocab_LoRA[particle] = nn.ModuleList([nn.Linear(self.embed_dim, self.space_vocab), nn.Linear(self.embed_dim, self.energy_vocab)])  # Train new heads
@@ -618,7 +660,7 @@ class ECAL_GPT(nn.Module):
         
         return cache_list
 
-    def extend_model(self, new_material_list,closest_expert=None,particle_type="e-"):
+    def extend_model(self, new_material_list,closest_expert=None,particle_type="e-",weights=None,pissa_init=False):
         # Extend model to an additional material/particle combo by adding experts and updating the router
         # This is done for a specific particle type e.g., G4_W_gamma
         # Assumes experts per class is constant 
@@ -629,7 +671,7 @@ class ECAL_GPT(nn.Module):
         if particle_type not in self.particle_list and particle_type != self.base_model_type:
             print("Adding new particle type; creating fine tuning modules.")
             self.particle_list.append(particle_type)
-            self.__build_LoRA_modules()
+            self.__build_LoRA_modules(weights=weights, pissa_init=pissa_init)
             self.lora_newly_created = True
 
         elif particle_type in self.particle_list and particle_type != self.base_model_type:
@@ -771,7 +813,8 @@ class ECAL_GPT(nn.Module):
         else:
             e_embed = self.energy_embedding(e)
 
-        e_embed = e_embed + self.energy_pos_embedding(pos)
+        if not self.use_RoPE: # Add absolute positional embeddings if not using RoPE
+            e_embed = e_embed + self.energy_pos_embedding(pos)
 
         e_embed = self.embedding_adapter[particle_type][1](e_embed) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_embed
 
@@ -787,7 +830,11 @@ class ECAL_GPT(nn.Module):
         initial_energy_embed = self.initial_energy_embedding(initial_energy).view(batch_size, 1, -1)  # (B, 1, E)
 
         # Apply adaptations to embeddings if applicable
-        x = self.token_embedding(x) + self.pos_embedding(pos)
+        if not self.use_RoPE:
+            x = self.token_embedding(x) + self.pos_embedding(pos)
+        else:
+            x = self.token_embedding(x)
+        
         x = self.embedding_adapter[particle_type][0](x) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else x
 
         e_embed = torch.cat((initial_energy_embed, e_embed), dim=1)  # Make sure to concat initial energy here
@@ -809,23 +856,15 @@ class ECAL_GPT(nn.Module):
                     lora_mod = lora_list[i] if lora_list[i] is not None else None
             
             if layer.__class__.__name__ == "CATransformerBlock":
-                x, _kv, load = layer(x, e_embed, material_index, padding_mask=padding_mask,LoRA_module=lora_mod)
+                x, _kv, load = layer(x, e_embed, material_index, padding_mask=padding_mask,rope=self.rope, LoRA_module=lora_mod)
             else:
-                x, _kv, load = layer(x, material_index, padding_mask=padding_mask,LoRA_module=lora_mod)
+                x, _kv, load = layer(x, material_index, padding_mask=padding_mask,rope=self.rope, LoRA_module=lora_mod)
             load_balance += load
 
         x = self.LN(x)
 
-        if self.enable_vocab_LoRA: # Should refactor this later such that loRA takes in the base head output and adds to it
-            delta_e = self.vocab_LoRA[particle_type][1](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
-            e_out = self.energy_head(x) + delta_e  # logits over time
-
-            delta_pixel = self.vocab_LoRA[particle_type][0](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
-            pixel = self.logits_head(x) + delta_pixel
-        else:
-            # Just stash the particle heads inside the vocab_LoRA dict for convenience
-            e_out = self.vocab_LoRA[particle_type][1](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.energy_head(x)  
-            pixel = self.vocab_LoRA[particle_type][0](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.logits_head(x)
+        e_out = self.vocab_LoRA[particle_type][1](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.energy_head(x)  # logits over time
+        pixel = self.vocab_LoRA[particle_type][0](x) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.logits_head(x)
 
         # Fixed return - fixes potential DDP issues
         return pixel, e_out, load_balance
@@ -939,7 +978,8 @@ class ECAL_GPT(nn.Module):
 
                 # Adjust temperature if dynamic
                 if dynamic_temp:
-                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.975)
+                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.935)
+                    # temperature = self.__increasing_exp_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     #print(f"Step {step}: temperature={temperature:.4f}")
 
                 if use_kv_cache:
@@ -947,20 +987,25 @@ class ECAL_GPT(nn.Module):
                         # FIRST STEP: [B, 2, E]
                         idx_buffer[:, 0] = self.SOS_token
                         pos_idx = torch.zeros((B, 1), device=device, dtype=torch.long)
+
+                        sos_embed = self.token_embedding(idx_buffer[:, 0:1]) 
                         
-                        sos_embed = self.token_embedding(idx_buffer[:, 0:1]) + self.pos_embedding(pos_idx)
-                        # Adapter on embeddings if avail
+                        if not self.use_RoPE:
+                            sos_embed = sos_embed + self.pos_embedding(pos_idx)
+
                         sos_embed = self.embedding_adapter[particle_type][0](sos_embed) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else sos_embed
                         
                         x_t = torch.cat([init_e_embed, sos_embed], dim=1)
                         
                         if self.digitize_energy:
                             e_buffer[:, 0] = 0
-                            e_sos = self.energy_embedding(e_buffer[:, 0:1]) + self.energy_pos_embedding(pos_idx)
+                            e_sos = self.energy_embedding(e_buffer[:, 0:1])
                         else:
                             e_buffer[:, 0] = 0.0
-                            e_sos = self.energy_embedding(e_buffer[:, 0:1].reshape(-1, 1)).view(B, 1, -1) + \
-                                    self.energy_pos_embedding(pos_idx)
+                            e_sos = self.energy_embedding(e_buffer[:, 0:1].reshape(-1, 1)).view(B, 1, -1) 
+
+                        if not self.use_RoPE:
+                            e_sos = e_sos + self.energy_pos_embedding(pos_idx)
                         
                         # Adapter on embeddings if avail
                         e_sos = self.embedding_adapter[particle_type][1](e_sos) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_sos
@@ -970,16 +1015,21 @@ class ECAL_GPT(nn.Module):
                         # SUBSEQUENT STEPS: [B, 1, E]
                         pos_idx = torch.full((B, 1), step, device=device, dtype=torch.long)
                         
-                        x_t = self.token_embedding(idx_buffer[:, step:step+1]) + self.pos_embedding(pos_idx)
+                        x_t = self.token_embedding(idx_buffer[:, step:step+1]) 
+
+                        if not self.use_RoPE:
+                            x_t = x_t + self.pos_embedding(pos_idx)
+
                         # Adapter on embeddings if avail
                         x_t = self.embedding_adapter[particle_type][0](x_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else x_t
                         
                         if self.digitize_energy:
-                            e_t = self.energy_embedding(e_buffer[:, step:step+1]) + \
-                                self.energy_pos_embedding(pos_idx)
+                            e_t = self.energy_embedding(e_buffer[:, step:step+1]) 
                         else:
-                            e_t = self.energy_embedding(e_buffer[:, step:step+1].reshape(-1, 1)).view(B, 1, -1) + \
-                                self.energy_pos_embedding(pos_idx)
+                            e_t = self.energy_embedding(e_buffer[:, step:step+1].reshape(-1, 1)).view(B, 1, -1)
+
+                        if not self.use_RoPE:
+                            e_t = e_t + self.energy_pos_embedding(pos_idx)
 
                         # Adapter on embeddings if avail
                         e_t = self.embedding_adapter[particle_type][1](e_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_t
@@ -991,19 +1041,11 @@ class ECAL_GPT(nn.Module):
                         is_first_step=(step == 0), particle_type=particle_type
                     )
 
-
-                    if self.enable_vocab_LoRA:
-                        delta_pixel = self.vocab_LoRA[particle_type][0](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
-                        pixel_logits = (self.logits_head(h_t)[:, -1, :] + delta_pixel) 
-                        delta_e = self.vocab_LoRA[particle_type][1](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
-                        energy_logits = (self.energy_head(h_t)[:, -1, :] + delta_e)
-                        pixel_logits = pixel_logits / temperature
-                        energy_logits = energy_logits / temperature
-                    else:
-                        energy_logits = self.vocab_LoRA[particle_type][1](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.energy_head(h_t)[:, -1, :]  
-                        pixel_logits = self.vocab_LoRA[particle_type][0](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.logits_head(h_t)[:, -1, :]
-                        
-
+                    # Either Vocab LoRA / new head or base model head
+                    energy_logits = self.vocab_LoRA[particle_type][1](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.energy_head(h_t)[:, -1, :]  
+                    pixel_logits = self.vocab_LoRA[particle_type][0](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.logits_head(h_t)[:, -1, :]    
+                    energy_logits = energy_logits / temperature
+                    pixel_logits = pixel_logits / temperature
                 else:
                     # NO-CACHE path
                     if step == 0:
@@ -1116,14 +1158,14 @@ class ECAL_GPT(nn.Module):
                 x, updated_cache, _lb = layer(
                     x, e, material_index,
                     padding_mask=padding_mask,
-                    past_kv=cache,LoRA_module=lora_mod
+                    past_kv=cache,rope=self.rope,LoRA_module=lora_mod
                 )
                 new_caches.append(updated_cache)
             else:
                 x, updated_cache, _lb = layer(
                     x, material_index,
                     padding_mask=padding_mask,
-                    past_kv=cache,LoRA_module=lora_mod
+                    past_kv=cache,rope=self.rope,LoRA_module=lora_mod
                 )
                 new_caches.append(updated_cache)
 

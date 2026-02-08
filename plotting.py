@@ -3,9 +3,13 @@ import math
 import h5py
 import os
 import awkward as ak
+
 import matplotlib as mpl
+import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+from mpl_toolkits.mplot3d import Axes3D
+
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -13,6 +17,7 @@ import vector
 from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
 from scipy.stats import wasserstein_distance
+import torch
 
 vector.register_awkward()
 
@@ -25,9 +30,12 @@ from utils.plotting_utils import (
     sum_energy_per_layer,
     sum_energy_per_radial_distance,
     write_distances_to_json,
-    plot_ratios
+    plot_ratios,
+    sum_energy_per_layer_unc,
+    sum_energy_per_radial_distance_unc
 )
 
+# Base plotting code taken directly from Omnijet Alpha-c: https://github.com/uhh-pd-ml/omnijet_alpha_c
 
 def binclip(x, bins, dropinf=False):
     binfirst_center = bins[0] + (bins[1] - bins[0]) / 2
@@ -1163,7 +1171,7 @@ def plot_distributions(fig, features_list, labels, colors, **kwargs):
         labels,
         colors,
         mask=mask,
-        weights="energy_filtered",
+        weights="energy_filtered"
     )
 
     ax4_twin.axhline(y=1, color="gray", linestyle="--")
@@ -1522,11 +1530,16 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
                     ),
                     axis=0,
                 ),
+                "distance_uncertainty":
+                    sum_energy_per_radial_distance_unc(
+                        filtered_features["x"], filtered_features["y"], filtered_features["energy"]),
                 "energy_filtered": ak.flatten(filtered_features["energy"]).to_numpy(),
                 "energy_per_layer": np.mean(
                     sum_energy_per_layer(filtered_features["z"], filtered_features["energy"]),
                     axis=0,
-                ),
+                ), 
+                "energy_per_layer_uncertainty":
+                    sum_energy_per_layer_unc(filtered_features["z"], filtered_features["energy"]),
                 "pixel": np.arange(0, 21) + 0.5,
                 "hits": np.arange(0, 29) + 0.5,
             }
@@ -1554,14 +1567,25 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
 
     energy_sum = 2000
     energy = 70
-    n_hits = 2000
+    if "gamma" in material:
+        n_hits = 1700
+    elif "e-" in material:
+        n_hits = 2000
+    else:
+        raise ValueError(f"Unknown material/PID combination: {material}")
 
     energy_bins = np.logspace(np.log10(0.01), np.log10(energy), 50)  # Logarithmic bins for energy
     energy_sum_bins = np.arange(0, energy_sum, 75)
     voxel_bins = np.arange(0, n_hits, 50)  # The number of hits
     dist_e_bins = np.arange(0, 21, 1)  # The distance
+    if material == "G4_W_gamma":
+        bins_cog = np.arange(8, 22, 0.5)
+    elif material == "G4_Ta_gamma":
+        bins_cog = np.arange(10,25,0.5)
+    elif material == "G4_W_e-":
+        bins_cog = np.arange(5,17,0.5)
     # bins_cog = np.arange(4, 25, 1.0)  # original - np.arange(8, 22, 0.5)
-    bins_cog = np.arange(5, 22, 0.5)
+    #bins_cog = np.arange(5, 22, 0.5)
     bins_z = np.arange(0, 31.5, 1)
 
     # Energy Distribution
@@ -1760,8 +1784,20 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     # Create twin axis for ratio plot
     ax4_twin = fig.add_subplot(gs[4, 1], sharex=ax4)
     mask = [0.7, 1.3]
+    # plot_ratios(
+    #     ax4_twin, features_list, bins_z, "hits", labels, colors, mask, weights="energy_per_layer"
+    # )
+
     plot_ratios(
-        ax4_twin, features_list, bins_z, "hits", labels, colors, mask, weights="energy_per_layer"
+        ax4_twin, 
+        features_list, 
+        bins_z, 
+        "hits",  # Not actually used when uncertainties is provided!
+        labels, 
+        colors, 
+        mask, 
+        weights="energy_per_layer",
+        uncertainties="energy_per_layer_uncertainty"  #
     )
 
     ax4_twin.axhline(y=1, color="gray", linestyle="--")
@@ -1786,8 +1822,20 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     # Create twin axis for ratio plot
     ax5_twin = fig.add_subplot(gs[4, 2], sharex=ax5)
     mask = [0.7, 1.3]
+    # plot_ratios(
+    #     ax5_twin, features_list, dist_e_bins, "pixel", labels, colors, mask, weights="distance"
+    # )
+
     plot_ratios(
-        ax5_twin, features_list, dist_e_bins, "pixel", labels, colors, mask, weights="distance"
+        ax5_twin, 
+        features_list, 
+        dist_e_bins, 
+        "pixel",  
+        labels, 
+        colors, 
+        mask, 
+        weights="distance",
+        uncertainties="distance_uncertainty"  
     )
 
     ax5_twin.axhline(y=1, color="gray", linestyle="--")
@@ -1878,6 +1926,10 @@ def read_generated(file_path,tokenizer,material_list=["G4_W","G4_Ta","G4_Pb"],nu
 
         if num_showers == -1:
             num_showers = len(showers)
+
+        total_showers = len(showers)
+
+        print(f"Total {material} showers in file: {total_showers}")
         
         for i,shower in enumerate(showers):
             init_E,spatial,energy,spatial_truth,energy_truth,material_index = shower
@@ -1912,7 +1964,7 @@ def read_generated(file_path,tokenizer,material_list=["G4_W","G4_Ta","G4_Pb"],nu
         ak_array_truth = ak.Array(data_dict_truth)
         return ak_array,ak_array_truth
 
-def make_plots(file_path,tokenizer,materials_to_plot=None,num_showers=-1,material_list=["G4_W","G4_Ta","G4_Pb"]):
+def make_plots(file_path,tokenizer,materials_to_plot=None,num_showers=-1,material_list=["G4_W","G4_Ta","G4_Pb"],comparison_path=None):
     
     if materials_to_plot is None:
         raise ValueError("materials_to_plot must be provided as a list of material names.")
@@ -1923,11 +1975,75 @@ def make_plots(file_path,tokenizer,materials_to_plot=None,num_showers=-1,materia
     for material in materials_to_plot:
         print("Making plots for material:",material)
         generated_features, ground_truth_features = read_generated(file_path, tokenizer, material_list, num_showers, material)
+
+        if comparison_path and material == "G4_W_gamma":
+            print("Loading Omnijet alpha_c features for comparison...")
+            omnijet_alpha_c = plot_utils.read_and_filter_energies(comparison_path)
+            labels = ["Geant4", "Ours", r"Omnijet-$\alpha_{c}$"]
+            colors  = ["lightgrey", "cornflowerblue", "green"]
+            # Sample out even sizes:
+            idx_ = np.random.choice(len(omnijet_alpha_c), size=len(ground_truth_features), replace=True)
+            omnijet_alpha_c = omnijet_alpha_c[idx_]
+            input_features = [ground_truth_features, generated_features, omnijet_alpha_c]
+        else:
+            labels = ["Geant4", "Ours"]
+            colors = ["lightgrey", "cornflowerblue"] 
+            input_features = [ground_truth_features, generated_features]
+
         fig = plot_paper_plots(
-            [ground_truth_features, generated_features],
-            labels=["Ground Truth", "Generated"],
-            colors=["lightgrey", "cornflowerblue"], material=material
+            input_features,
+            labels=labels,
+            colors=colors, material=material
         )
 
         fig.savefig(f"Plots/{filename}_{material}.pdf", dpi=300)
 
+
+def map_vocab_to_tokens(tokens, grid_size=30):
+    z = tokens // (grid_size * grid_size)
+    rem = tokens % (grid_size * grid_size)
+    y = rem // grid_size
+    x = rem % grid_size
+
+    return x,y,z
+
+def visualize_vocab_LoRA(A,B,W_orig,label):
+    os.makedirs("Plots",exist_ok=True)
+    os.makedirs("Plots/Vocab_Visualizations",exist_ok=True)
+
+    W  = B @ A + W_orig  # [V, D]
+    W_token = W.mean(dim=1)  # [V], signed
+    denom = W_token.abs().max() + 1e-12
+    W_norm = (W_token / denom).detach().cpu().numpy()  # [V], signed in [-1,1]
+
+    if label == "Pixel":
+        W_norm = W_norm[:-1] # exclude PAD tokens        
+        plt.tight_layout()
+        fig,ax = plt.subplots(1,1,figsize=(6,4))
+        ax.bar(np.arange(len(W_norm)),W_norm,color="cornflowerblue",alpha=1.0)
+        ax.set_xlabel("Pixel Token Bias")
+        ax.set_ylabel("a.u.")
+        ax.set_title(f"Vocabulary Token Bias Visualization - {label}")
+
+        grid_size = 30
+        tokens_per_layer = grid_size * grid_size  # 900 tokens per layer
+        for layer in range(1, 30):  # 30 layers total
+            ax.axvline(x=layer * tokens_per_layer, color='red', linestyle='--', linewidth=1, alpha=0.5)
+            #ax.text(layer * tokens_per_layer - tokens_per_layer/2, ax.get_ylim()[1]*0.9, f'Layer {layer-1}', color='red', fontsize=8, ha='center')
+
+        plt.tight_layout()
+        plt.savefig(f"Plots/Vocab_Visualizations/Vocab_Bias_{label}.pdf", dpi=300)
+        plt.close()
+
+    elif label == "Energy":
+        W_norm = W_norm[:-1] # exclude PAD tokens
+        fig,ax = plt.subplots(1,1,figsize=(6,4))
+        #ax.hist(W_norm,bins=50,color="cornflowerblue",alpha=0.7,density=True)
+        ax.bar(np.arange(len(W_norm)),W_norm,color="cornflowerblue",alpha=1.0)
+        ax.set_xlabel("Energy Token Bias")
+        ax.set_ylabel("a.u.")
+        ax.set_title(f"Vocabulary Token Bias Visualization - {label}")
+
+        plt.tight_layout()
+        plt.savefig(f"Plots/Vocab_Visualizations/Vocab_Bias_{label}.pdf",dpi=300)
+        plt.close()
