@@ -1565,11 +1565,15 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     # Binning setup (adjust ranges and bins as needed for your data)
     fontsize_labels = 18
 
-    energy_sum = 2000
+    if material == "G4_Pb_gamma":
+        energy_sum = 2400
+    else:
+        energy_sum = 2000
+
     energy = 70
-    if "gamma" in material:
+    if "gamma" in material and "Pb" not in material:
         n_hits = 1700
-    elif "e-" in material:
+    elif "e-" in material or "Pb" in material:
         n_hits = 2000
     else:
         raise ValueError(f"Unknown material/PID combination: {material}")
@@ -1584,6 +1588,10 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
         bins_cog = np.arange(10,25,0.5)
     elif material == "G4_W_e-":
         bins_cog = np.arange(5,17,0.5)
+    elif material == "G4_Pb_gamma":
+        bins_cog = np.arange(11, 30, 0.5)
+    else:
+        bins_cog = np.arange(0, 31.5, 0.5)
     # bins_cog = np.arange(4, 25, 1.0)  # original - np.arange(8, 22, 0.5)
     #bins_cog = np.arange(5, 22, 0.5)
     bins_z = np.arange(0, 31.5, 1)

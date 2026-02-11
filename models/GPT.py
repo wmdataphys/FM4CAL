@@ -564,7 +564,7 @@ class ECAL_GPT(nn.Module):
             # Vocab LoRA modules or new heads
             if self.enable_vocab_LoRA:
                 vocab_r = int(self.LoRA_r * self.vocab_LoRA_scale)
-                vocab_alpha = int(self.LoRA_alpha * self.vocab_LoRA_scale / 4)
+                vocab_alpha = int(self.LoRA_alpha * self.vocab_LoRA_scale / 2)
                 print(f"Creating Vocab LoRA modules for particle type: {particle}. LoRA_r={vocab_r}, LoRA_alpha={vocab_alpha}, vocab_LoRA_scale={vocab_alpha/np.sqrt(vocab_r)} ")
                 pixel_weight = weights['logits_head'] if weights else None
                 energy_weight = weights['energy_head'] if weights else None
@@ -978,7 +978,7 @@ class ECAL_GPT(nn.Module):
 
                 # Adjust temperature if dynamic
                 if dynamic_temp:
-                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.935)
+                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     # temperature = self.__increasing_exp_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     #print(f"Step {step}: temperature={temperature:.4f}")
 

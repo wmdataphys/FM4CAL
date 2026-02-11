@@ -1,6 +1,7 @@
 import os
 import sys 
 import gc
+import time 
 
 import torch
 import torch.nn as nn
@@ -24,7 +25,7 @@ from dataloader.tokenizer import EnergyTokenizer
 from dataloader.dataset import ECAL_Chunked_Dataset
 from dataloader.dataloader import CreateLoaderMoE
 
-from models.GPT import ECAL_GPT
+from models.GPT_RoPE import ECAL_GPT
 from models.MoE import MoE
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -32,7 +33,8 @@ import torch.distributed as dist
 warnings.filterwarnings("ignore", message=".*weights_only.*")
 
 
-def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma','G4_Ta_gamma'],material_to_add=None,closest_expert=None,base_particle_list=None,particle_type=None,enable_pissa=False):
+def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma','G4_Ta_gamma'],material_to_add=None,
+                 closest_expert=None,base_particle_list=None,particle_type=None,enable_pissa=False):
 
     assert material_to_add is not None, "Material to add for fine-tuning must be specified."
 
@@ -226,7 +228,7 @@ class Trainer:
             print("=============================================\n")
 
         self.num_epochs = config['num_epochs']
-        milestones = [5,10,15,20] 
+        milestones = [5,10] 
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=milestones,gamma=0.1)
         print("Using LR Scheduler with milestones at epochs: ", milestones)
         self.history = {'train_loss': [], 'val_loss': []}
@@ -345,19 +347,23 @@ class Trainer:
                 print(f"  - {name}")
             print(f"==========================================\n")
 
-    def init_kbar(self, num_files, num_epochs=1):
+    def init_kbar(self, num_files, num_epochs=1,n_events=None):
         total_samples = num_files * self.config['dataset']['tracks_per_file']
+
+        if n_events is not None:
+            total_samples = min(total_samples, n_events)
+
         per_gpu_bs = self.config['dataloader']['train']['batch_size_ft'] // self.world_size
         total_batches = math.ceil((total_samples / self.world_size) / per_gpu_bs)
         self.kbar = pkbar.Kbar(target=total_batches, epoch=self.epoch, num_epochs=num_epochs, width=20)
             
-    def load_chunked_dataset(self,file_list,verbose=False): 
+    def load_chunked_dataset(self,file_list,verbose=False,n_events=None,dataset_seed=42): 
         global_e_max = self.stats['global_energy_max']
         global_e_min = self.stats['global_energy_min']
         stats = {"Initial_Energy_Max": global_e_max, "Initial_Energy_Min": global_e_min}
         dataset = ECAL_Chunked_Dataset(file_list=file_list,max_seq_length=self.max_seq_length,energy_digitizer=self.energy_digitizer
                                        ,verbose=verbose,ordering='energy',global_stats=stats,
-                                       material_list=self.material_list)
+                                       material_list=self.material_list,n_events=n_events,dataset_seed=dataset_seed)
         sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True)
         loader = CreateLoaderMoE(dataset, sampler=sampler, batch_size=self.config['dataloader']['train']['batch_size_ft'] // self.world_size,
                                 num_workers=self.config['dataloader']['train']['num_workers'],
@@ -456,7 +462,7 @@ class Trainer:
         self.history['train_loss'].append(epoch_loss)
 
     def on_epoch_end(self, val_loader=None,write_path=None):
-        if val_loader:
+        if val_loader is not None:
             self.model.eval()
             val_pixel_loss = 0.0
             val_energy_loss = 0.0
@@ -518,8 +524,8 @@ class Trainer:
                 'global_step': self.global_step,
             }, filename)
 
-def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tune_path=None, default_material_list=None, material_to_add=None, closest_expert=None, run_val=True, write_path=None, checkpoint=None,
-               base_particle_list=["gamma"], particle_type='gamma', enable_pissa=False):
+def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tune_path=None, default_material_list=None, material_to_add=None, closest_expert=None, run_val=False, write_path=None, checkpoint=None,
+               base_particle_list=["gamma"], particle_type='gamma', enable_pissa=False, n_events=None,dataset_seed=42):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
@@ -540,8 +546,10 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tu
 
     print(f"Rank {rank} - Starting training with {num_files} files, chunk size: {chunk_size}, num epochs: {num_epochs}")
 
-    model = create_model(config, fine_tune_path=fine_tune_path, default_material_list=default_material_list, material_to_add=material_to_add, closest_expert=closest_expert, base_particle_list=base_particle_list, particle_type=particle_type,enable_pissa=enable_pissa)
-    trainer = Trainer(config, rank, world_size, model, default_material_list=default_material_list, material_to_add=material_to_add, particle_type=particle_type)
+    model = create_model(config, fine_tune_path=fine_tune_path, default_material_list=default_material_list, material_to_add=material_to_add, closest_expert=closest_expert,
+                         base_particle_list=base_particle_list, particle_type=particle_type,enable_pissa=enable_pissa)
+    trainer = Trainer(config, rank, world_size, model, default_material_list=default_material_list, material_to_add=material_to_add, 
+                      particle_type=particle_type)
 
     if checkpoint is not None:
         if 'net_state_dict' in checkpoint:
@@ -563,7 +571,7 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tu
     for epoch in range(trainer.epoch,num_epochs):
         trainer.epoch = epoch
         trainer.global_batch_in_epoch = 0  
-        trainer.init_kbar(num_files,num_epochs)
+        trainer.init_kbar(num_files,num_epochs,n_events=n_events)
         torch.cuda.empty_cache()  
         gc.collect()
 
@@ -574,12 +582,11 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tu
         
         for start_idx in range(0, num_files, chunk_size):
             file_chunk = shuffled_files[start_idx : start_idx + chunk_size]
-            train_loader, sampler = trainer.load_chunked_dataset(file_chunk,verbose=False)
+            train_loader, sampler = trainer.load_chunked_dataset(file_chunk,verbose=False, n_events=n_events, dataset_seed=dataset_seed)
             
             if sampler is not None:
                 sampler.set_epoch(epoch)
 
-            #print("Starting training for epoch", epoch, "chunk", start_idx // chunk_size + 1)
             trainer.train_epoch(train_loader, sampler)
 
         trainer.scheduler.step()
@@ -590,7 +597,16 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tu
             val_loader, _ = trainer.load_chunked_dataset(all_val_files[random_idx].tolist(),verbose=False)
             trainer.on_epoch_end(val_loader,write_path)
         else:
-            trainer.on_epoch_end(write_path)
+            trainer.on_epoch_end(val_loader=None, write_path=write_path)
+
+    if rank == 0:
+        final_ckpt = os.path.join(write_path, f'Epoch{trainer.epoch:02d}_loss_*.pth')
+        import glob
+        final_ckpt_files = glob.glob(final_ckpt)
+        if final_ckpt_files:
+            print(f"\n{'='*60}")
+            print(f"FINAL_CHECKPOINT_PATH={final_ckpt_files[0]}")
+            print(f"{'='*60}\n")
     
     dist.destroy_process_group()
 
@@ -606,16 +622,28 @@ def read_text(file_path):
     except FileNotFoundError:
         raise ValueError(f"Error: The file '{file_path}' was not found.")
 
-def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_path=None, material_to_add=None, closest_expert=None, base_particle_list=["gamma"], particle_type="gamma"):
-    # Setup random seed
+def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_path=None, material_to_add=None, 
+         closest_expert=None, base_particle_list=["gamma"], particle_type="gamma", enable_pissa=False, n_events=None,dataset_seed=42):
+    
+    if n_events is not None:
+        print(f"Fine-tuning on a subset of {n_events} events.")
+        print(f"Dataset will use seed: {dataset_seed} (unique per run)")
+
+    print("Setting random seed to: ", config['seed'])
+
     torch.manual_seed(config['seed'])
     np.random.seed(config['seed'])
     random.seed(config['seed'])
     torch.cuda.manual_seed(config['seed'])
 
     # Create experiment name
+    if n_events is not None:
+        temp_ = f"___subset_{n_events}_events"
+    else:
+        temp_ = ""
+        
     curr_date = datetime.now()
-    exp_name = config['name'] + '___' + curr_date.strftime('%b-%d-%Y___%H:%M:%S')
+    exp_name = config['name'] + '___' + curr_date.strftime('%b-%d-%Y___%H:%M:%S') + temp_
     exp_name = exp_name[:-11]
     print(exp_name)
 
@@ -638,9 +666,14 @@ def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_pat
     print("Particle type(s) for fine-tuning: ", particle_type)
     print("Closest expert for initialization: ", closest_expert)
 
-
     train_files += read_text(config['dataset']['training'][material_to_add + '_train_files'])
     val_files += read_text(config['dataset']['validation'][material_to_add + '_val_files'])
+
+    if args.n_events is not None:
+        n_events_per_file = config['dataset']['tracks_per_file']
+        n_files_needed = math.ceil(args.n_events / n_events_per_file)
+        random_idx = np.random.permutation(len(train_files))[:n_files_needed]
+        train_files = [train_files[i] for i in random_idx]
 
 
     random.shuffle(train_files)
@@ -657,7 +690,8 @@ def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_pat
                closest_expert=closest_expert,
                base_particle_list=base_particle_list,
                particle_type=particle_type,
-               enable_pissa=args.enable_pissa)
+               enable_pissa=enable_pissa,
+               n_events=n_events)
 
 if __name__=='__main__':
     # PARSE THE ARGS
@@ -677,8 +711,10 @@ if __name__=='__main__':
                         help='Closest expert material to initialize new expert from (e.g., "G4_Ta_gamma")')
     parser.add_argument('--enable_pissa', action='store_true',
                         help='Enable PiSSA weight initialization for vocab LoRA modules.')
+    parser.add_argument('--n_events', type=int, default=None, help='Number of events to use for fine-tuning.')
+    parser.add_argument('--dataset_seed', type=int, default=42, help='Random seed for dataset shuffling (default: 42)')
     args = parser.parse_args()
 
     config = json.load(open(args.config))
 
-    main(config,args.default_material_list,args.fine_tune_path,args.material_to_add,args.closest_expert,args.base_particle_list,args.particle_type)
+    main(config,args.default_material_list,args.fine_tune_path,args.material_to_add,args.closest_expert,args.base_particle_list,args.particle_type,args.enable_pissa,args.n_events,args.dataset_seed)

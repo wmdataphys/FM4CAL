@@ -7,6 +7,7 @@ import glob
 from typing import Literal
 import pickle
 from tqdm import tqdm
+import time
 import random
 from torch.utils.data import IterableDataset, get_worker_info
 import torch.distributed as dist
@@ -18,7 +19,7 @@ class ECAL_Chunked_Dataset(Dataset):
                  ordering: Literal['energy', 'spatial'] = 'energy',
                  material_list: list = ["G4_W_gamma", "G4_Ta_gamma"],
                  global_stats: dict = {"Initial_Energy_Max": 100.0, "Initial_Energy_Min": 10.0},
-                 inference_mode: bool = False
+                 inference_mode: bool = False, n_events = None,dataset_seed=42
                     ):
 
         # Constant shape per shower
@@ -34,6 +35,9 @@ class ECAL_Chunked_Dataset(Dataset):
         self.pad_token = self.EOS_token + 1  # 27002
         self.global_stats = global_stats
         self.inference_mode = inference_mode
+        self.n_events = n_events
+        self.dataset_seed = dataset_seed
+        self.rng = random.Random(self.dataset_seed)
 
         # Energy tokens
         self.energy_EOS_token = 25000 + 1
@@ -96,7 +100,7 @@ class ECAL_Chunked_Dataset(Dataset):
                     group = f[key]
                     indices = group["indices"][()]
 
-                    if len(indices) < 1:  # Skip empty showers
+                    if len(indices) < 1:
                         continue
 
                     values = group["values"][()]
@@ -116,12 +120,17 @@ class ECAL_Chunked_Dataset(Dataset):
 
                     if self.inference_mode:
                         # We will decode the pixels later, but use ground truth energies for plotting   
-                        # Remove any bias in smearing processes later, although is negligible
                         ground_truth_cache.append((initial_energy, energy_copy))
 
 
         if not self.inference_mode:
-            random.shuffle(cache)
+            if self.n_events is not None:
+                idx = list(range(len(cache)))
+                self.rng.shuffle(idx)
+                cache = [cache[i] for i in idx[:self.n_events]]
+            else:
+                random.shuffle(cache)
+                
             return cache
 
         else:

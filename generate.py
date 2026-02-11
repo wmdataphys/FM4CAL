@@ -47,13 +47,13 @@ def main(config,args):
     mlp_scale = config['model']['mlp_scale']
     msl = config['model']['max_seq_length']
     drop_rates = config['model']['drop_rates']
-    material_list = config['material_list']
+    material_list = args.material_list if args.material_list is not None else config['material_list']
     num_experts = len(material_list)
     use_MoE = bool(config['model']['use_MoE'])
     digitize_energy = bool(config['digitize_energy'])
     use_kv_cache = bool(args.use_kv_cache)
     base_model_type = config['base_model_type']
-    particle_list = config['particle_list']
+    particle_list = args.particle_list if args.particle_list is not None else config['particle_list']
     loRA_r = config['model']['LoRA_r']
     loRA_alpha = config['model']['LoRA_alpha']
     enable_head_LoRA = config['model']['enable_head_LoRA']
@@ -72,12 +72,11 @@ def main(config,args):
     else:
         materials_to_generate = material_list
         print("Generating for all materials in config: ", materials_to_generate)
-    
-    print(material_list)
+ 
     energy_digitizer = EnergyTokenizer(e_max=e_max, e_min=e_min, resolution=energy_res)
-    outfile = os.path.join("Generations", config['Inference']['output_file'])
+    outfile = os.path.join("Generations", args.output_file if args.output_file is not None else config['Inference']['output_file'])
 
-    if os.path.exists(outfile):
+    if os.path.exists(outfile) and not args.inference_only:
         print(f"Output file {outfile} already exists, do you want to overwrite it? (y/n)")
         response = input().strip().lower()
         if response != 'y':
@@ -124,9 +123,14 @@ def main(config,args):
                 use_RoPE=use_RoPE
                 ).to(args.device)
 
-    model_path = config['Inference']['model_path']
+    model_path = config['Inference']['model_path'] if args.model_path is None else args.model_path
     checkpoint = torch.load(model_path, map_location=device)
-    model.load_state_dict(checkpoint["net_state_dict"],strict=True)
+    try:
+        model.load_state_dict(checkpoint["net_state_dict"],strict=True)
+    except Exception as e:
+        print(f"Error loading state dict: {e}")
+        print("Did you forget to add a material or particle to the config file?")
+        exit(1)
 
     scaler = None
     if args.use_amp:
@@ -169,6 +173,8 @@ def main(config,args):
             particle_type = "gamma"
         else:
             raise ValueError("Unknown particle type in material: ", material)
+
+    print("Particle type", particle_type)
 
     for name, param in model.named_parameters():
         if particle_type in name:
@@ -321,7 +327,8 @@ def main(config,args):
 
     print("Generation complete. Output written to: ", outfile)
     print("Generating plots...")
-    make_plots(outfile, energy_digitizer,materials_to_plot=materials_to_generate, num_showers=args.num_showers,material_list=material_list,comparison_path=args.comp_paths)
+    if not args.inference_only:
+        make_plots(outfile, energy_digitizer,materials_to_plot=materials_to_generate, num_showers=args.num_showers,material_list=material_list,comparison_path=args.comp_paths)
 
 
 class ShowerWriterCompound:
@@ -393,6 +400,11 @@ if __name__ == "__main__":
     parser.add_argument('--dynamic_temp', action='store_true', help='Whether to use dynamic temperature during generation.')
     parser.add_argument('--visualize_vocab_LoRA', action='store_true', help='Whether to visualize vocab LoRA matrices after loading model.')
     parser.add_argument('--comp_paths', type=str, nargs='+', default=None, help='Paths to additional models for comparison.')
+    parser.add_argument('--model_path', type=str, default=None, help='Path to model checkpoint for generation. Overrides config if set.')
+    parser.add_argument('--output_file', type=str, default=None, help='Output file name for generated showers. Overrides config if set.')
+    parser.add_argument('--inference_only', action='store_true', help='If set, only runs inference and plotting without generation. Assumes output file already exists.')
+    parser.add_argument('--particle_list', type=str, nargs='+', default=None, help='List of particles to use. Overrides config if set.')
+    parser.add_argument('--material_list', type=str, nargs='+', default=None, help='List of materials to use. Overrides config if set.')
     args = parser.parse_args()
 
     os.makedirs("Generations", exist_ok=True)
