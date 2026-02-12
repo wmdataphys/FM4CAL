@@ -120,14 +120,13 @@ class ECAL_Chunked_Dataset(Dataset):
 
                     if self.inference_mode:
                         # We will decode the pixels later, but use ground truth energies for plotting   
+                        # Remove any bias in smearing processes later, although is negligible
                         ground_truth_cache.append((initial_energy, energy_copy))
 
 
         if not self.inference_mode:
             if self.n_events is not None:
-                idx = list(range(len(cache)))
-                self.rng.shuffle(idx)
-                cache = [cache[i] for i in idx[:self.n_events]]
+                cache = self.rng.sample(cache, k=self.n_events)
             else:
                 random.shuffle(cache)
                 

@@ -529,6 +529,7 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tu
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
+    print("Rank ", rank, " - dataset_seed: ", dataset_seed)
     # Array so we can Shuffle for permutations later - only val over diff subset each time
     all_val_files = np.array(all_val_files)
 
@@ -691,7 +692,8 @@ def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_pat
                base_particle_list=base_particle_list,
                particle_type=particle_type,
                enable_pissa=enable_pissa,
-               n_events=n_events)
+               n_events=n_events,
+               dataset_seed=dataset_seed)
 
 if __name__=='__main__':
     # PARSE THE ARGS

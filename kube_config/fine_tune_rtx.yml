@@ -34,22 +34,23 @@ spec:
 
           for RUN_NUM in {1..10}; do
             echo "=========================================="
-            echo "Starting run $RUN_NUM / 10 (n_events=100)"
+            echo "Starting run $RUN_NUM / 10 (n_events=1000)"
             echo "=========================================="
             
-
+            DATASET_SEED=$(date +%s%N | tail -c 10)
             torchrun --nproc-per-node=4 /sciclone/home/jgiroux/FM4CAL/fine_tune.py \
               --config /sciclone/home/jgiroux/FM4CAL/config/CA_config_dist_copy.json \
               --default_material_list "G4_W_gamma" "G4_Ta_gamma" \
               --material_to_add "G4_Pb_gamma" \
               --closest_expert "G4_Ta_gamma" \
               --base_particle_list "gamma" \
-              --n_events 100 \
-              --dataset_seed $((8 + RUN_NUM)) \
+              --particle_type "gamma" \
+              --n_events 1000 \
+              --dataset_seed $DATASET_SEED \
               --fine_tune_path /sciclone/data10/jgiroux/ECAL_Cole/ECAL_Models/Restart_APE_Model___Feb-04-2026/Epoch10_loss_9.690241.pth \
-              > /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_100Events_${RUN_NUM}.txt 2>&1
+              > /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_1000Events_${RUN_NUM}.txt 2>&1
             
-            CKPT_PATH=$(grep "FINAL_CHECKPOINT_PATH=" /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_100Events_${RUN_NUM}.txt | tail -1 | cut -d'=' -f2)
+            CKPT_PATH=$(grep "FINAL_CHECKPOINT_PATH=" /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_1000Events_${RUN_NUM}.txt | tail -1 | cut -d'=' -f2)
     
             if [ -z "$CKPT_PATH" ]; then
               echo "Could not find FINAL_CHECKPOINT_PATH in logs, prepare for breakage..."
@@ -63,19 +64,19 @@ spec:
             torchrun --nproc-per-node=4 /sciclone/home/jgiroux/FM4CAL/generate_dist.py \
               --config /sciclone/home/jgiroux/FM4CAL/config/CA_config_dist_copy.json \
               --material_list "G4_W_gamma" "G4_Ta_gamma" "G4_Pb_gamma" \
-              --output_file "FineTune_APE_Epoch10_Pb_100Events_${RUN_NUM}.h5" \
+              --output_file "FineTune_APE_Epoch10_Pb_1000Events_${RUN_NUM}.h5" \
               --inference_only \
               --model_path "$CKPT_PATH" \
               --use_kv_cache \
               --use_amp \
               --materials_to_generate "G4_Pb_gamma" \
               --dynamic_temp \
-              >> /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_100Events_${RUN_NUM}.txt 2>&1
+              >> /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_1000Events_${RUN_NUM}.txt 2>&1
 
             # Check exit code
             if [ $? -ne 0 ]; then
               echo "❌ Generation failed for run $RUN_NUM! Check logs:"
-              echo "/sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_100Events_${RUN_NUM}.txt"
+              echo "/sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_1000Events_${RUN_NUM}.txt"
               exit 1
             fi
 
