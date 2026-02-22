@@ -2,7 +2,7 @@ import math
 import numpy as np
 import pkbar
 import copy
-
+import contextlib
 
 from models.MoE import MoE, Router, Expert
 from models.LoRA import LoRA ,Embed_LoRA, Vocab_LoRA, ConditionedAdapter, LPE_Expansion
@@ -113,9 +113,9 @@ class CrossAttention(nn.Module):
                 k = rope.rotate_queries_or_keys(k, offset=offset)
 
         # Normalize Q and K
-        if self.qk_norm:
-            k = F.normalize(k, p=2, dim=-1)
-            q = F.normalize(q, p=2, dim=-1)
+        # if self.qk_norm and self.training:
+        #     k = F.normalize(k, p=2, dim=-1)
+        #     q = F.normalize(q, p=2, dim=-1)
 
         # Handle KV cache with pre-allocation
         if past_kv is not None:
@@ -143,29 +143,23 @@ class CrossAttention(nn.Module):
         else:
             updated_cache = None
 
+        is_decode = (past_kv is not None)
+
         # Compute attention scores
-        if self.qk_norm:
-            attn_scores = self.g_scale * q @ k.transpose(2, 3)
-        else:
-            attn_scores = self.d_k * q @ k.transpose(2, 3)
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,  # causal mask or None
+            dropout_p=self.dropout.p if self.training else 0.0,
+            is_causal=not is_decode       # control causality via mask + KV cache
+        )
 
-        if attn_mask is not None:
-            attn_scores.masked_fill_(attn_mask, -torch.inf)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_len, embed_dim)
 
-        if key_padding_mask is not None:
-            key_padding_mask = key_padding_mask[:, None, None, :]
-            attn_scores.masked_fill_(key_padding_mask, -torch.inf)
-
-        attn_scores = F.softmax(attn_scores, dim=-1)
-        attn_scores = self.dropout(attn_scores)
-
-        attn_output = (attn_scores @ v).transpose(1, 2)
-        attn_output = attn_output.contiguous().view(batch_size, seq_len, embed_dim)
-
-        if need_weights:
-            return attn_output, attn_scores
-        else:
-            return (attn_output, updated_cache)
+        # if need_weights:
+        #     return attn_output, attn_scores
+        # else:
+        return (attn_output, updated_cache)
 
 
 class CATransformerBlock(nn.Module):
@@ -191,6 +185,9 @@ class CATransformerBlock(nn.Module):
         self.attn = CrossAttention(self.embed_dim, self.num_heads, dropout=self.drop_rate, device=self.device)
         self.c_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.LN2 = nn.LayerNorm(self.embed_dim)
+
+        self.register_buffer('_load_balance_placeholder', torch.tensor([0.0], dtype=torch.float32))
+
         if self.use_MoE:
             self.num_experts = num_experts
             self.num_classes = num_classes
@@ -215,16 +212,15 @@ class CATransformerBlock(nn.Module):
 
         x_norm = self.xN(x)
         e_norm = self.eN(e_embed)
-        load_balance = torch.tensor([0.0], dtype=torch.float32, device=x.device)  # place holder for non MoE model return
 
-        need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
-        mask_ = self.generate_mask(N_t) if need_causal else None
+        # need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
+        # mask_ = self.generate_mask(N_t) if need_causal else None
 
 
         attn_out, kv_ca = self.attn(x_norm,
                                     e_norm,
                                     key_padding_mask=padding_mask,
-                                    attn_mask=mask_,
+                                    attn_mask=None,
                                     past_kv=past_kv,
                                     rope=rope,
                                     LoRA_module=LoRA_module)
@@ -314,9 +310,9 @@ class MHSA(nn.Module):
                 k = rope.rotate_queries_or_keys(k, offset=offset)
 
         # Normalize Q and K
-        if self.qk_norm:
-            k = F.normalize(k, p=2, dim=-1)
-            q = F.normalize(q, p=2, dim=-1)
+        # if self.qk_norm and self.training:
+        #     k = F.normalize(k, p=2, dim=-1)
+        #     q = F.normalize(q, p=2, dim=-1)
 
         # Handle KV cache with pre-allocation
         if past_kv is not None:
@@ -345,28 +341,27 @@ class MHSA(nn.Module):
             updated_cache = None
 
         # Compute attention scores
-        if self.qk_norm:
-            attn_scores = self.g_scale * q @ k.transpose(2, 3)
-        else:
-            attn_scores = self.d_k * q @ k.transpose(2, 3)
-
-        if attn_mask is not None:
-            attn_scores.masked_fill_(attn_mask, -torch.inf)
-
         if key_padding_mask is not None:
-            key_padding_mask = key_padding_mask[:, None, None, :]
-            attn_scores.masked_fill_(key_padding_mask, -torch.inf)
+            # key_padding_mask: [B, T_k] True = mask
+            kpm = key_padding_mask[:, None, None, :]  # [B,1,1,T_k]
+            attn_mask = kpm if attn_mask is None else (attn_mask | kpm)
+        
+        is_decode = (past_kv is not None)
 
-        attn_scores = F.softmax(attn_scores, dim=-1)
-        attn_scores = self.dropout(attn_scores)
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            is_causal=not is_decode,  # you're handling causality via attn_mask + KV cache logic
+        )
 
-        attn_output = (attn_scores @ v).transpose(1, 2)
-        attn_output = attn_output.contiguous().view(batch_size, T_new, embed_dim)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, T_new, embed_dim)
 
-        if need_weights:
-            return attn_output, attn_scores
-        else:
-            return (attn_output, updated_cache)
+        # if need_weights:
+        #     return attn_output, attn_scores
+        # else:
+        return (attn_output, updated_cache)
 
 
 class TransformerBlock(nn.Module):
@@ -383,6 +378,8 @@ class TransformerBlock(nn.Module):
         self.attn = MHSA(self.embed_dim, self.num_heads, dropout=self.drop_rate, device=self.device)
         self.c_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
         self.LN2 = nn.LayerNorm(self.embed_dim)
+
+        self.register_buffer('_load_balance_placeholder', torch.tensor([0.0], dtype=torch.float32))
 
         if self.use_MoE:
             self.num_experts = num_experts
@@ -407,10 +404,9 @@ class TransformerBlock(nn.Module):
                 LoRA_module=None):
         B, N_t, t_dim = x.shape
         x_norm = self.LN1(x)
-        load_balance = torch.tensor([0.0], dtype=torch.float32, device=x.device)  # place holder for non MoE model return
 
-        need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
-        mask_ = self.generate_mask(N_t) if need_causal else None
+        # need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
+        # mask_ = self.generate_mask(N_t) if need_causal else None
 
         attn_out, kv_mhsa = self.attn(
                                 x_norm,
@@ -571,6 +567,15 @@ class ECAL_GPT(nn.Module):
         self.EOS_energy_token = energy_vocab - 2  
         self.energy_pad_token = energy_vocab - 1 
 
+        # Compilation flag
+        self._skip_compile = False
+
+    def set_skip_compile(self, skip: bool = True):
+        """Disable torch.compile (needed for quantization compatibility)."""
+        self._skip_compile = skip
+        self._compiled_decode = None
+
+    def __build_LoRA_modules(self,energy_vocab=False):
         if self.is_expanded:
             self.__build_LPE_expansion(self.seq_len)  # seq_len is updated value
             self.pos_embedding = nn.Embedding(self.base_seq_len, embed_dim)  # Re-initialize positional embeddings for base dims
@@ -667,6 +672,9 @@ class ECAL_GPT(nn.Module):
         self._compiled_decode = None
 
     def _get_compiled_decode(self):
+        if self._skip_compile:
+            return self.forward_decode_step
+        
         if self._compiled_decode is None:
             self._compiled_decode = torch.compile(
                 self.forward_decode_step,
@@ -684,6 +692,9 @@ class ECAL_GPT(nn.Module):
         """
         cache_list = []
         
+        if dtype is None:
+            dtype = torch.float32 if device == "cpu" else torch.float16
+
         for layer in self.layers:
             if isinstance(layer, CATransformerBlock):
                 num_heads = layer.attn.num_heads
@@ -709,6 +720,36 @@ class ECAL_GPT(nn.Module):
             })
         
         return cache_list
+
+    def _allocate_static_buffers(self, batch_size, max_len, device, dtype=torch.bfloat16):
+        """
+        Allocate all static buffers needed for CUDA graph capture
+        """
+        buffers = {
+            # input buffers
+            'x_t': torch.zeros(batch_size, 1, self.embed_dim, dtype=dtype, device=device),
+            'e_t': torch.zeros(batch_size, 1, self.embed_dim, dtype=dtype, device=device),
+
+            # Position index (static shape, value updated via copy_)
+            'pos_idx': torch.zeros(batch_size, 1, dtype=torch.long, device=device),
+
+            # Output buffers
+            'h_out': torch.zeros(batch_size, 1, self.embed_dim, dtype=dtype, device=device),
+            'pixel_logits': torch.zeros(batch_size, self.space_vocab, dtype=dtype, device=device),
+            'energy_logits': torch.zeros(batch_size, self.energy_vocab, dtype=dtype, device=device),
+
+            # Token buffers
+            'idx_buffer': torch.zeros(batch_size, max_len + 1, dtype=torch.long, device=device),
+            'e_buffer': torch.zeros(batch_size, max_len + 1, dtype=torch.long, device=device),
+            
+            # Intermediate embedding buffers
+            'tok_embed': torch.zeros(batch_size, 1, self.embed_dim, dtype=dtype, device=device),
+            'pos_embed': torch.zeros(batch_size, 1, self.embed_dim, dtype=dtype, device=device),
+            'e_embed': torch.zeros(batch_size, 1, self.embed_dim, dtype=dtype, device=device),
+            'e_pos_embed': torch.zeros(batch_size, 1, self.embed_dim, dtype=dtype, device=device),
+            }
+        
+        return buffers
 
     def extend_sequence_length(self, new_seq_len):
         # Extend model to longer sequence lengths via expansion and masking
@@ -913,6 +954,7 @@ class ECAL_GPT(nn.Module):
             energy_mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=x.device)  # No masking for kinematic tokens
             padding_mask = torch.cat((energy_mask, padding_mask), dim=1)
 
+        lora_modules = self._get_lora_modules_for_particle(particle_type)
         load_balance = x.new_zeros(())  
 
         for i, layer in enumerate(self.layers):
@@ -943,6 +985,18 @@ class ECAL_GPT(nn.Module):
         sampled = torch.multinomial(probs, num_samples=1)
         idx_next = topk_indices.gather(-1, sampled)
         return idx_next
+
+    def _get_lora_modules_for_particle(self, particle_type):
+        """Pre-compute LoRA module list to avoid repeated lookups."""
+        if not hasattr(self, 'particle_lora') or particle_type not in self.particle_lora:
+            return [None] * len(self.layers)
+        
+        lora_list = self.particle_lora[particle_type]
+        if not isinstance(lora_list, (list, nn.ModuleList)):
+            return [None] * len(self.layers)
+        
+        return [lora_list[i] if i < len(lora_list) and lora_list[i] is not None else None 
+                for i in range(len(self.layers))]
 
     def __min_p(self, logits, min_p=0.05, min_tokens_to_keep=50, return_logits=False):
         assert 0 <= min_p <= 1, "min_p must be between 0 and 1"
@@ -993,6 +1047,30 @@ class ECAL_GPT(nn.Module):
         temperature = min_temp + alpha * math.exp(-decay_rate * step)
         return temperature
 
+    def gumbel_sample(self, logits, temperature=1.0, noise_buffer=None):
+        """
+        Fast sampling using Gumbel-max trick.
+        Uses pre-allocated noise buffer if provided.
+        """
+        if temperature == 0:
+            return torch.argmax(logits, dim=-1, keepdim=True)
+        
+        if noise_buffer is not None:
+            # In-place: fill buffer with uniform random, then transform to Gumbel
+            noise_buffer.uniform_().clamp_(min=1e-8)
+            torch.log(noise_buffer, out=noise_buffer)
+            noise_buffer.neg_()
+            noise_buffer.clamp_(min=1e-8)
+            torch.log(noise_buffer, out=noise_buffer)
+            noise_buffer.neg_()
+            gumbel = noise_buffer
+        else:
+            # Fallback: allocate new tensor
+            u = torch.rand_like(logits).clamp_(min=1e-8)
+            gumbel = -torch.log(-torch.log(u))
+        
+        return torch.argmax(logits / temperature + gumbel, dim=-1, keepdim=True)
+
     def __increasing_linear_temp(self, step, max_length, max_temp=1.2, min_temp=1.0):
         return min(max_temp, min_temp + (max_temp - min_temp) * (step / max_length))
 
@@ -1006,9 +1084,14 @@ class ECAL_GPT(nn.Module):
     def generate(self, initial_energy, material_index, max_seq_len=2100,
                 context_len=None, temperature: float = 1.0, method="Default",
                 topK=100, nucleus_p=0.95, dynamic_temp=False, use_kv_cache=True,particle_type="gamma",compiled_decode=False):
-
+        
+        lora_modules = self._get_lora_modules_for_particle(particle_type)
+        
         device = self.device
         B = initial_energy.shape[0]
+
+        use_amp = (device == "cuda")
+        amp_dtype = AMP_DTYPE if use_amp else torch.float32
 
         if initial_energy.dim() == 1:
             initial_energy = initial_energy.unsqueeze(1)
@@ -1025,14 +1108,38 @@ class ECAL_GPT(nn.Module):
         else:
             e_buffer = torch.zeros((B, max_seq_len + 1), device=device, dtype=torch.float32)
 
+        pos_idx_buffer = torch.zeros((B, 1), device=device, dtype=torch.long)
+
+        # Token sampling buffers
+        idx_next_buffer = torch.zeros((B, 1), device=device, dtype=torch.long)
+        e_next_buffer = torch.zeros((B, 1), device=device, dtype=torch.long)
+        
+        # Store buffers (avoid .clone() each step)
+        idx_store_buffer = torch.zeros(B, device=device, dtype=torch.long)
+        e_store_buffer = torch.zeros(B, device=device, dtype=torch.long)
+        
+        # Mask buffers
+        newly_done_buffer = torch.zeros(B, dtype=torch.bool, device=device)
+        pad_mask_buffer = torch.zeros(B, dtype=torch.bool, device=device)
+        eos_mask_buffer = torch.zeros(B, dtype=torch.bool, device=device)
+        
+        # Gumbel noise buffers (if using gumbel sampling)
+        gumbel_pixel_buffer = torch.zeros((B, self.space_vocab), device=device, dtype=torch.float32)
+        gumbel_energy_buffer = torch.zeros((B, self.energy_vocab), device=device, dtype=torch.float32)
+
+        if use_amp:
+            autocast_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype)
+        else:
+            autocast_ctx = contextlib.nullcontext()
+
         # Pre-allocate KV cache if enabled
         if use_kv_cache:
-            with torch.autocast(device_type="cuda", dtype=AMP_DTYPE):
+            with autocast_ctx:
                 kv_caches = self._allocate_kv_cache(
                     batch_size=B,
                     max_len=max_seq_len + 2,  # +2 for init_energy + buffer
                     device=device,
-                    dtype=AMP_DTYPE
+                    dtype=amp_dtype
                 )
             if compiled_decode:
                 decode_fn = self._get_compiled_decode()
@@ -1042,7 +1149,7 @@ class ECAL_GPT(nn.Module):
             kv_caches = [None] * len(self.layers)
             decode_fn = self.forward_decode_step
 
-        with torch.autocast(device_type="cuda", dtype=AMP_DTYPE):
+        with autocast_ctx:
             for step in range(max_seq_len):
 
                 # Adjust temperature if dynamic
@@ -1057,15 +1164,15 @@ class ECAL_GPT(nn.Module):
                     if step == 0:
                         # FIRST STEP: [B, 2, E]
                         idx_buffer[:, 0] = self.SOS_token
-                        pos_idx = torch.zeros((B, 1), device=device, dtype=torch.long)
+                        pos_idx_buffer.fill_(step)
 
                         sos_embed = self.token_embedding(idx_buffer[:, 0:1]) 
                         
                         if not self.use_RoPE:
                             if self.lpe_expansion_pos is not None: # Continually expanded
-                                sos_embed = sos_embed + self.lpe_expansion_pos(pos_idx)
+                                sos_embed = sos_embed + self.lpe_expansion_pos(pos_idx_buffer)
                             else: # Base
-                                sos_embed = sos_embed + self.pos_embedding(pos_idx)
+                                sos_embed = sos_embed + self.pos_embedding(pos_idx_buffer)
 
                         sos_embed = self.embedding_adapter[particle_type][0](sos_embed) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else sos_embed
                         
@@ -1073,16 +1180,16 @@ class ECAL_GPT(nn.Module):
                         
                         if self.digitize_energy:
                             e_buffer[:, 0] = 0
-                            e_sos = self.energy_embedding(e_buffer[:, 0:1])
+                            e_sos = self.energy_embedding(e_buffer[:, 0:1]) + self.energy_pos_embedding(pos_idx_buffer)
                         else:
                             e_buffer[:, 0] = 0.0
                             e_sos = self.energy_embedding(e_buffer[:, 0:1].reshape(-1, 1)).view(B, 1, -1) 
 
                         if not self.use_RoPE:
                             if self.lpe_expansion_energy is not None: # Continually expanded
-                                e_sos = e_sos + self.lpe_expansion_energy(pos_idx)
+                                e_sos = e_sos + self.lpe_expansion_energy(pos_idx_buffer)
                             else: # Base
-                                e_sos = e_sos + self.energy_pos_embedding(pos_idx)
+                                e_sos = e_sos + self.energy_pos_embedding(pos_idx_buffer)
                         
                         # Adapter on embeddings if avail
                         e_sos = self.embedding_adapter[particle_type][1](e_sos) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_sos
@@ -1090,29 +1197,30 @@ class ECAL_GPT(nn.Module):
                         
                     else:
                         # SUBSEQUENT STEPS: [B, 1, E]
-                        pos_idx = torch.full((B, 1), step, device=device, dtype=torch.long)
+                        pos_idx_buffer.fill_(step)
                         
                         x_t = self.token_embedding(idx_buffer[:, step:step+1]) 
 
                         if not self.use_RoPE:
                             if self.lpe_expansion_pos is not None: # Continually expanded
-                                x_t = x_t + self.lpe_expansion_pos(pos_idx)
+                                x_t = x_t + self.lpe_expansion_pos(pos_idx_buffer)
                             else: # Base
-                                x_t = x_t + self.pos_embedding(pos_idx)
+                                x_t = x_t + self.pos_embedding(pos_idx_buffer)
 
                         # Adapter on embeddings if avail
                         x_t = self.embedding_adapter[particle_type][0](x_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else x_t
                         
                         if self.digitize_energy:
-                            e_t = self.energy_embedding(e_buffer[:, step:step+1]) 
+                            e_t = self.energy_embedding(e_buffer[:, step:step+1]) + \
+                                self.energy_pos_embedding(pos_idx_buffer)
                         else:
                             e_t = self.energy_embedding(e_buffer[:, step:step+1].reshape(-1, 1)).view(B, 1, -1)
 
                         if not self.use_RoPE:
                             if self.lpe_expansion_energy is not None: # Continually expanded
-                                e_t = e_t + self.lpe_expansion_energy(pos_idx)
+                                e_t = e_t + self.lpe_expansion_energy(pos_idx_buffer)
                             else: # Base
-                                e_t = e_t + self.energy_pos_embedding(pos_idx)
+                                e_t = e_t + self.energy_pos_embedding(pos_idx_buffer)
 
                         # Adapter on embeddings if avail
                         e_t = self.embedding_adapter[particle_type][1](e_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_t
@@ -1121,7 +1229,9 @@ class ECAL_GPT(nn.Module):
                         x_t, e_t, material_index,
                         padding_mask=None,
                         kv_caches=kv_caches,
-                        is_first_step=(step == 0), particle_type=particle_type
+                        is_first_step=(step == 0),
+                        particle_type=particle_type,
+                        lora_modules=lora_modules
                     )
 
                     # Either Vocab LoRA / new head or base model head
@@ -1151,67 +1261,74 @@ class ECAL_GPT(nn.Module):
 
                 # Sample tokens
                 if method == "Default":
-                    probs = F.softmax(pixel_logits, dim=-1)
-                    idx_next = torch.multinomial(probs, num_samples=1)
-                elif method == "TopK":
-                    idx_next = self.__topK(pixel_logits, topK)
-                elif method == "Nucleus":
-                    idx_next = self.__nucleus(pixel_logits, nucleus_p)
+                    idx_next = self.gumbel_sample(pixel_logits, temperature, noise_buffer=gumbel_pixel_buffer)
                 elif method == "Greedy":
-                    idx_next = torch.argmax(pixel_logits, dim=-1, keepdim=True)
-                elif method == "Min_p":
-                    idx_next = self.__min_p(pixel_logits)
+                    torch.argmax(pixel_logits, dim=1, keepdim=True, out=idx_next_buffer)
+                    idx_next = idx_next_buffer
+                else:
+                    if method == "TopK":
+                        idx_next = self.__topK(pixel_logits, topK)
+                    elif method == "Nucleus":
+                        idx_next = self.__nucleus(pixel_logits, nucleus_p)
+                    elif method == "Min_p":
+                        idx_next = self.__min_p(pixel_logits)
 
                 if self.digitize_energy:
-                    probs_t = F.softmax(energy_logits, dim=-1, dtype=torch.float32)
                     if method == "Default":
-                        e_next = torch.multinomial(probs_t, num_samples=1)
-                    elif method == "TopK":
-                        e_next = self.__topK(energy_logits, topK)
-                    elif method == "Nucleus":
-                        e_next = self.__nucleus(energy_logits, nucleus_p)
+                        e_next = self.gumbel_sample(energy_logits, temperature, noise_buffer=gumbel_energy_buffer)
                     elif method == "Greedy":
-                        e_next = torch.argmax(energy_logits, dim=-1, keepdim=True)
+                        torch.argmax(energy_logits, dim=-1, keepdim=True, out=e_next_buffer)
+                        e_next = e_next_buffer
                     else:
-                        e_next = self.__min_p(energy_logits)
+                        if method == "TopK":
+                            e_next = self.__topK(energy_logits, topK)
+                        elif method == "Nucleus":
+                            e_next = self.__nucleus(energy_logits, nucleus_p)
+                        else:
+                            e_next = self.__min_p(energy_logits)
                 else:
                     e_next = energy_val.unsqueeze(1)
 
                 # EOS handling
                 if self.digitize_energy:
-                    newly_done = (e_next.squeeze(1) == self.EOS_energy_token) | (idx_next.squeeze(1) == self.EOS_token)
+                    # Compute masks in-place
+                    torch.eq(e_next.squeeze(1), self.EOS_energy_token, out=newly_done_buffer)
+                    newly_done_buffer.logical_or_(idx_next.squeeze(1) == self.EOS_token)
                 else:
-                    newly_done = (idx_next.squeeze(1) == self.EOS_token)
+                    torch.eq(idx_next.squeeze(1), self.EOS_token, out=newly_done_buffer)
 
-                pad_mask = is_done & ~newly_done
-                eos_mask = newly_done
-                is_done |= newly_done
+                torch.logical_and(is_done, ~newly_done_buffer, out=pad_mask_buffer)
+                eos_mask_buffer.copy_(newly_done_buffer)
+                is_done.logical_or_(newly_done_buffer)
 
                 # Store tokens
-                idx_store = idx_next.squeeze(1).clone()
-                idx_store[eos_mask] = self.EOS_token
-                idx_store[pad_mask] = self.pad_token
-                idx_buffer[:, step + 1] = idx_store
+                idx_store_buffer.copy_(idx_next.squeeze(1))
+                idx_store_buffer.masked_fill_(eos_mask_buffer, self.EOS_token)
+                idx_store_buffer.masked_fill_(pad_mask_buffer, self.pad_token)
+                idx_buffer[:, step + 1] = idx_store_buffer
 
                 if self.digitize_energy:
-                    e_store = e_next.squeeze(1).clone()
-                    e_store[eos_mask] = self.EOS_energy_token
-                    e_store[pad_mask] = self.energy_pad_token
-                    e_buffer[:, step + 1] = e_store
+                    e_store_buffer.copy_(e_next.squeeze(1))
+                    e_store_buffer.masked_fill_(eos_mask_buffer, self.EOS_energy_token)
+                    e_store_buffer.masked_fill_(pad_mask_buffer, self.energy_pad_token)
+                    e_buffer[:, step + 1] = e_store_buffer
                 else:
-                    e_store = e_next.squeeze(1).clone()
+                    e_store_buffer.copy_(e_next.squeeze(1))
                     if step > 0:
-                        e_store[pad_mask] = e_buffer[:, step][pad_mask]
-                    e_buffer[:, step + 1] = e_store
+                        # Only copy from previous for already-done sequences
+                        e_store_buffer[pad_mask_buffer] = e_buffer[:, step][pad_mask_buffer]
+                    e_buffer[:, step + 1] = e_store_buffer
 
-                if torch.all(is_done):
-                    actual_len = step + 2
-                    return idx_buffer[:, :actual_len].contiguous(), e_buffer[:, :actual_len].contiguous()
+                if step > max_seq_len - 200 or (step + 1) % 200 == 0:
+                    if is_done.all():
+                        actual_len = step + 2
+                        return idx_buffer[:, :actual_len], e_buffer[:, :actual_len]
 
         return idx_buffer, e_buffer
 
     def forward_decode_step(self, x_t, e_t, material_index,
-                            padding_mask=None, kv_caches=None, is_first_step=False, particle_type="gamma"):
+                            padding_mask=None, kv_caches=None,
+                            is_first_step=False, particle_type="gamma", lora_modules=None):
         """
         Args:
             x_t: [B, T_new, E] where T_new=2 on first step, 1 after
@@ -1230,13 +1347,7 @@ class ECAL_GPT(nn.Module):
         e = e_t
         new_caches = []
         
-        for i, (layer, cache) in enumerate(zip(self.layers, kv_caches)):
-            lora_mod = None
-            if hasattr(self, 'particle_lora') and particle_type in self.particle_lora:
-                lora_list = self.particle_lora[particle_type]
-                if isinstance(lora_list, (list, nn.ModuleList)) and len(lora_list) > 0:
-                    lora_mod = lora_list[i] if lora_list[i] is not None else None
-
+        for i, (layer, cache, lora_mod) in enumerate(zip(self.layers, kv_caches, lora_modules)):
             if isinstance(layer, CATransformerBlock):
                 x, updated_cache, _lb = layer(
                     x, e, material_index,
@@ -1258,3 +1369,268 @@ class ECAL_GPT(nn.Module):
         x = x[:, -1:, :]
         
         return x, new_caches
+    
+    def forward_decode_step_static(self, buffers, kv_caches, seq_len, material_index,
+                                   particle_type="gamma", lora_modules=None):
+        """
+        Static decode step that only uses pre-allocated buffers.
+        No dynamic tensor creation - suitable for CUDA graph capture.
+        
+        Args:
+            buffers: Dict of pre-allocated static buffers
+            kv_caches: List of KV cache dicts
+            seq_len: Current sequence length (Python int, not tensor)
+            material_index: Material index tensor
+            particle_type: Particle type string
+        """
+        x = buffers['x_t']
+        e = buffers['e_t']
+
+        if lora_modules is None:
+            lora_modules = [None] * len(self.layers)
+
+        for i, (layer, cache, lora_mod) in enumerate(zip(self.layers, kv_caches, lora_modules)):
+            # Update cache seq_len before forward pass
+            cache['seq_len'] = seq_len
+
+            if isinstance(layer, CATransformerBlock):
+                x, _, _lb = layer(
+                    x, e, material_index,
+                    padding_mask=None,
+                    past_kv=cache,
+                    LoRA_module=lora_mod
+                )
+            else:
+                x, _, _lb = layer(
+                    x, material_index,
+                    padding_mask=None,
+                    past_kv=cache,
+                    LoRA_module=lora_mod
+                )
+        
+        x = self.LN(x)
+
+        # Write to output buffer in-place
+        buffers['h_out'].copy_(x[:, -1:, :])
+
+        # Compute logits in place
+        h_last = buffers['h_out'].squeeze(1)
+
+        delta_pixel = self.vocab_LoRA[particle_type][0](buffers['h_out']).squeeze(1) \
+            if (hasattr(self, 'vocab_LoRA') and  particle_type in self.vocab_LoRA) else 0.0
+        buffers['pixel_logits'].copy_(self.logits_head(h_last) + delta_pixel)
+
+        if hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA:
+            buffers['pixel_logits'].copy_(
+                self.vocab_LoRA[particle_type][0].apply_product(buffers['pixel_logits'])
+            )
+        
+        if self.digitize_energy:
+            delta_e = self.vocab_LoRA[particle_type][1](buffers['h_out']).squeeze(1) \
+                if (hasattr(self, 'vocab_LoRA') and  particle_type in self.vocab_LoRA) else 0.0
+            buffers['energy_logits'].copy_(self.energy_head(h_last) + delta_e)
+
+            if hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA:
+                buffers['energy_logits'].copy_(
+                    self.vocab_LoRA[particle_type][1].apply_product(buffers['energy_logits'])
+                )
+
+    @torch.inference_mode()
+    def generate_with_cuda_graph(
+        self,
+        initial_energy,
+        material_index,
+        max_seq_len=2100,
+        temperature: float = 1.0,
+        particle_type="gamma"
+    ):
+        """
+        Generation using CUDA graphs for maximum inference speed.
+        """
+        lora_modules = self._get_lora_modules_for_particle(particle_type)
+
+        device = self.device
+        B = initial_energy.shape[0]
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+        if initial_energy.dim() == 1:
+            initial_energy = initial_energy.unsqueeze(1)
+        
+        # Allocate all static buffers
+        buffers = self._allocate_static_buffers(B, max_seq_len, device, dtype)
+        kv_caches = self._allocate_kv_cache(B, max_seq_len + 2, device, dtype)
+        
+        # Pre-compute initial energy embedding (used every step for CA)
+        init_e_embed = self.initial_energy_embedding(initial_energy).unsqueeze(1).to(dtype)
+        
+        is_done = torch.zeros(B, dtype=torch.bool, device=device)
+        
+        # ============ FIRST STEP (no graph - has different shape) ============
+        with torch.amp.autocast('cuda', dtype=dtype):
+            buffers['idx_buffer'][:, 0] = self.SOS_token
+            buffers['e_buffer'][:, 0] = 0
+            
+            buffers['pos_idx'].zero_()
+            
+            # Compute embeddings for first step
+            sos_embed = (self.token_embedding(buffers['idx_buffer'][:, 0:1]) + 
+                        self.pos_embedding(buffers['pos_idx']))
+            if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
+                sos_embed = self.embedding_adapter[particle_type][0](sos_embed)
+            
+            e_sos = (self.energy_embedding(buffers['e_buffer'][:, 0:1]) + 
+                    self.energy_pos_embedding(buffers['pos_idx']))
+            if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
+                e_sos = self.embedding_adapter[particle_type][1](e_sos)
+            
+            # First step: [init_e, sos] -> shape [B, 2, E]
+            x_first = torch.cat([init_e_embed, sos_embed], dim=1)
+            e_first = torch.cat([init_e_embed, e_sos], dim=1)
+            
+            # Run first step without graph (shape is [B, 2, E])
+            for i, (layer, cache) in enumerate(zip(self.layers, kv_caches)):
+                cache['seq_len'] = 0
+                lora_mod = None
+                if hasattr(self, 'particle_lora') and particle_type in self.particle_lora:
+                    lora_list = self.particle_lora[particle_type]
+                    if isinstance(lora_list, (list, nn.ModuleList)) and len(lora_list) > 0:
+                        lora_mod = lora_list[i] if lora_list[i] is not None else None
+                
+                if isinstance(layer, CATransformerBlock):
+                    x_first, _, _ = layer(x_first, e_first, material_index, 
+                                        padding_mask=None, past_kv=cache, LoRA_module=lora_mod)
+                else:
+                    x_first, _, _ = layer(x_first, material_index,
+                                        padding_mask=None, past_kv=cache, LoRA_module=lora_mod)
+            
+            x_first = self.LN(x_first)
+            h_last = x_first[:, -1, :]
+            
+            # Get first token
+            pixel_logits = self.logits_head(h_last) / temperature
+            energy_logits = self.energy_head(h_last) / temperature
+            
+            idx_next = torch.multinomial(F.softmax(pixel_logits, dim=-1), num_samples=1)
+            e_next = torch.multinomial(F.softmax(energy_logits, dim=-1), num_samples=1)
+            
+            buffers['idx_buffer'][:, 1] = idx_next.squeeze(1)
+            buffers['e_buffer'][:, 1] = e_next.squeeze(1)
+        
+        # ============ WARMUP FOR CUDA GRAPH (steps 1-2) ============
+        # Must be inside autocast to match dtypes
+        warmup_stream = torch.cuda.Stream()
+        with torch.cuda.stream(warmup_stream):
+            with torch.amp.autocast('cuda', dtype=dtype):
+                for warmup_step in range(2):
+                    step = warmup_step + 1  # Already did step 0
+                    seq_len_for_cache = step + 1  # +1 for init_e_embed
+                    
+                    buffers['pos_idx'].fill_(step)
+                    
+                    # Compute embeddings into static buffers
+                    buffers['tok_embed'].copy_(self.token_embedding(buffers['idx_buffer'][:, step:step+1]).to(dtype))
+                    buffers['pos_embed'].copy_(self.pos_embedding(buffers['pos_idx']).to(dtype))
+                    buffers['x_t'].copy_(buffers['tok_embed'] + buffers['pos_embed'])
+                    
+                    if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
+                        buffers['x_t'].copy_(self.embedding_adapter[particle_type][0](buffers['x_t']))
+                    
+                    buffers['e_embed'].copy_(self.energy_embedding(buffers['e_buffer'][:, step:step+1]).to(dtype))
+                    buffers['e_pos_embed'].copy_(self.energy_pos_embedding(buffers['pos_idx']).to(dtype))
+                    buffers['e_t'].copy_(buffers['e_embed'] + buffers['e_pos_embed'])
+                    
+                    if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
+                        buffers['e_t'].copy_(self.embedding_adapter[particle_type][1](buffers['e_t']))
+                    
+                    self.forward_decode_step_static(
+                        buffers, kv_caches, seq_len_for_cache, material_index, particle_type, lora_modules=lora_modules
+                    )
+        
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+        
+        # ============ CAPTURE CUDA GRAPH ============
+        # Set up for capture at step index 3
+        capture_step = 3
+        
+        with torch.amp.autocast('cuda', dtype=dtype):
+            buffers['pos_idx'].fill_(capture_step)
+            
+            # Pre-fill input buffers with dummy data for capture
+            buffers['tok_embed'].copy_(self.token_embedding(buffers['idx_buffer'][:, capture_step:capture_step+1]).to(dtype))
+            buffers['pos_embed'].copy_(self.pos_embedding(buffers['pos_idx']).to(dtype))
+            buffers['x_t'].copy_(buffers['tok_embed'] + buffers['pos_embed'])
+            
+            buffers['e_embed'].copy_(self.energy_embedding(buffers['e_buffer'][:, capture_step:capture_step+1]).to(dtype))
+            buffers['e_pos_embed'].copy_(self.energy_pos_embedding(buffers['pos_idx']).to(dtype))
+            buffers['e_t'].copy_(buffers['e_embed'] + buffers['e_pos_embed'])
+        
+        # Capture the graph - must also be in autocast
+        graph = torch.cuda.CUDAGraph()
+        with torch.amp.autocast('cuda', dtype=dtype):
+            with torch.cuda.graph(graph):
+                self.forward_decode_step_static(
+                    buffers, kv_caches, capture_step + 1, material_index, particle_type, lora_modules
+                )
+        
+        # ============ MAIN GENERATION LOOP ============
+        with torch.amp.autocast('cuda', dtype=dtype):
+            for step in range(1, max_seq_len):
+                seq_len_for_cache = step + 1
+                
+                # Update position (Python int copy, not tensor op)
+                buffers['pos_idx'].fill_(step)
+                
+                # Compute embeddings (these can't easily be in the graph due to indexing)
+                buffers['tok_embed'].copy_(self.token_embedding(buffers['idx_buffer'][:, step:step+1]).to(dtype))
+                buffers['pos_embed'].copy_(self.pos_embedding(buffers['pos_idx']).to(dtype))
+                buffers['x_t'].copy_(buffers['tok_embed'] + buffers['pos_embed'])
+                
+                if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
+                    buffers['x_t'].copy_(self.embedding_adapter[particle_type][0](buffers['x_t']))
+                
+                buffers['e_embed'].copy_(self.energy_embedding(buffers['e_buffer'][:, step:step+1]).to(dtype))
+                buffers['e_pos_embed'].copy_(self.energy_pos_embedding(buffers['pos_idx']).to(dtype))
+                buffers['e_t'].copy_(buffers['e_embed'] + buffers['e_pos_embed'])
+                
+                if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
+                    buffers['e_t'].copy_(self.embedding_adapter[particle_type][1](buffers['e_t']))
+                
+                # Update cache seq_len for all layers
+                for cache in kv_caches:
+                    cache['seq_len'] = seq_len_for_cache
+                
+                # Replay the captured graph
+                graph.replay()
+                
+                # Sample from logits (outside graph due to randomness)
+                pixel_logits = buffers['pixel_logits'] / temperature
+                energy_logits = buffers['energy_logits'] / temperature
+                
+                idx_next = torch.multinomial(F.softmax(pixel_logits, dim=-1, dtype=torch.float32), num_samples=1)
+                e_next = torch.multinomial(F.softmax(energy_logits, dim=-1, dtype=torch.float32), num_samples=1)
+                
+                # EOS handling
+                newly_done = (e_next.squeeze(1) == self.EOS_energy_token) | \
+                            (idx_next.squeeze(1) == self.EOS_token)
+                
+                pad_mask = is_done & ~newly_done
+                eos_mask = newly_done
+                is_done = is_done | newly_done
+                
+                # Store tokens
+                idx_store = idx_next.squeeze(1)
+                idx_store.masked_fill_(eos_mask, self.EOS_token)
+                idx_store.masked_fill_(pad_mask, self.pad_token)
+                buffers['idx_buffer'][:, step + 1] = idx_store
+                
+                e_store = e_next.squeeze(1)
+                e_store.masked_fill_(eos_mask, self.EOS_energy_token)    # 25001
+                e_store.masked_fill_(pad_mask, self.energy_pad_token)    # 25002
+                buffers['e_buffer'][:, step + 1] = e_store
+                
+                if (step + 1) % 100 == 0:
+                    if torch.all(is_done):
+                        return (buffers['idx_buffer'][:, :step+2].clone(),
+                                buffers['e_buffer'][:, :step+2].clone())
+        
+        return buffers['idx_buffer'].clone(), buffers['e_buffer'].clone()
