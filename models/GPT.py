@@ -5,7 +5,7 @@ import copy
 
 
 from models.MoE import MoE, Router, Expert
-from models.LoRA import LoRA ,Embed_LoRA, Vocab_LoRA, ConditionedAdapter
+from models.LoRA import LoRA ,Embed_LoRA, Vocab_LoRA, ConditionedAdapter, LPE_Expansion
 
 import torch
 import torch.nn as nn
@@ -90,13 +90,25 @@ class CrossAttention(nn.Module):
         v = v.transpose(1, 2)
 
         if rope is not None:
-            if past_kv is None:
-                # First step: no offset needed
-                q = rope.rotate_queries_or_keys(q)
-                k = rope.rotate_queries_or_keys(k)
+            # T_new = 2 in Step 0, or some padded length in Training
+            # T_new = 1 in all KV Cache steps
+            T_new = q.shape[2] 
+
+            if T_new > 1:
+                # Train/Gen Step 0 -> dont rotate global context
+                q_global, k_global = q[:, :, :1, :], k[:, :, :1, :]
+                q_hits, k_hits = q[:, :, 1:, :], k[:, :, 1:, :]
+                
+                # Hits start at offset 1
+                q_hits = rope.rotate_queries_or_keys(q_hits, offset=1)
+                k_hits = rope.rotate_queries_or_keys(k_hits, offset=1)
+                
+                q = torch.cat([q_global, q_hits], dim=2)
+                k = torch.cat([k_global, k_hits], dim=2)
             else:
-                # Subsequent steps: offset = cached sequence length
-                offset = past_kv['seq_len']
+                # offset is simply the current length of the KV cache.
+                offset = past_kv['seq_len'] 
+                
                 q = rope.rotate_queries_or_keys(q, offset=offset)
                 k = rope.rotate_queries_or_keys(k, offset=offset)
 
@@ -279,13 +291,25 @@ class MHSA(nn.Module):
         v = v.transpose(1, 2)
 
         if rope is not None:
-            if past_kv is None:
-                # First step: no offset needed
-                q = rope.rotate_queries_or_keys(q)
-                k = rope.rotate_queries_or_keys(k)
+            # T_new = 2 in Step 0, or some padded length in Training
+            # T_new = 1 in all KV Cache steps
+            T_new = q.shape[2] 
+
+            if T_new > 1:
+                # Train/Gen Step 0 -> dont rotate global context
+                q_global, k_global = q[:, :, :1, :], k[:, :, :1, :]
+                q_hits, k_hits = q[:, :, 1:, :], k[:, :, 1:, :]
+                
+                # Hits start at offset 1
+                q_hits = rope.rotate_queries_or_keys(q_hits, offset=1)
+                k_hits = rope.rotate_queries_or_keys(k_hits, offset=1)
+                
+                q = torch.cat([q_global, q_hits], dim=2)
+                k = torch.cat([k_global, k_hits], dim=2)
             else:
-                # Subsequent steps: offset = cached sequence length
-                offset = past_kv['seq_len']
+                # offset is simply the current length of the KV cache.
+                offset = past_kv['seq_len'] 
+                
                 q = rope.rotate_queries_or_keys(q, offset=offset)
                 k = rope.rotate_queries_or_keys(k, offset=offset)
 
@@ -432,11 +456,14 @@ class ECAL_GPT(nn.Module):
                 LoRA_r: int =16,
                 enable_head_LoRA: bool = False, # Q,K,V and c_proj in MHSA/CA 
                 enable_vocab_LoRA: bool = False,
+                learnable_vocabs = False, # If vocab LoRA is false, add new heads or just freeze and reuse old heads for new particle types
                 vocab_LoRA_scale: int = 1, # Scale factor for vocab LoRA rank
                 enable_embedding_adapter = False, # Embedding adapter modules for token and energy embeddings
                 use_RoPE: bool = True,
+                is_expanded: bool = False, base_seq_len: int = 1800 # hard base seq len for pre-trained models, only relevant if is_expanded is True
                 ):
         super().__init__()
+        self.base_seq_len = base_seq_len # Store base_seq_len for reference in LPE expansion
         self.embed_dim = embed_dim
         self.seq_len = seq_len
         self.attn_heads = attn_heads
@@ -445,8 +472,10 @@ class ECAL_GPT(nn.Module):
         self.drop_rates = drop_rates
         self.use_MoE = use_MoE
         self.base_model_type = base_model_type
+        self.is_expanded = is_expanded
 
         # Fine Tune params
+        self.learnable_vocabs = learnable_vocabs
         self.use_LoRA = enable_head_LoRA or enable_vocab_LoRA
         self.LoRA_alpha = LoRA_alpha
         self.LoRA_r = LoRA_r
@@ -488,11 +517,10 @@ class ECAL_GPT(nn.Module):
             self.energy_pos_embedding = nn.Embedding(seq_len, embed_dim)
             print(self.rope)
         else:
-            print("Using RoPE. Theta=1000")
+            print("Using RoPE. Theta=4000")
             self.rope = RotaryEmbedding(dim = self.embed_dim // self.attn_heads[0],
-                                        cache_max_seq_len = self.seq_len, # 2100
                                         cache_if_possible = True,
-                                        theta = 1000)
+                                        theta = 4000)
             print(self.rope)
 
         # Add in 3D positional embeddings if provided
@@ -543,10 +571,23 @@ class ECAL_GPT(nn.Module):
         self.EOS_energy_token = energy_vocab - 2  
         self.energy_pad_token = energy_vocab - 1 
 
+        if self.is_expanded:
+            self.__build_LPE_expansion(self.seq_len)  # seq_len is updated value
+            self.pos_embedding = nn.Embedding(self.base_seq_len, embed_dim)  # Re-initialize positional embeddings for base dims
+            self.energy_pos_embedding = nn.Embedding(self.base_seq_len, embed_dim)
+        else:
+            self.lpe_expansion_pos = None  # Placeholder for LPE expansion modules
+            self.lpe_expansion_energy = None
+
+    def __build_LPE_expansion(self,new_seq_len,pos_weight=None,energy_weight=None):
+        self.lpe_expansion_pos = LPE_Expansion(self.embed_dim, new_seq_len,weight=pos_weight)
+        self.lpe_expansion_energy = LPE_Expansion(self.embed_dim, new_seq_len,weight=energy_weight)
+
     def __build_LoRA_modules(self,weights=None,pissa_init=False):
         self.embedding_adapter = {}
         self.particle_lora = {} 
         self.vocab_LoRA = {}
+        self.init_e_adapter = {}
         for particle in self.particle_list:
             if particle == self.base_model_type:
                 self.particle_lora[particle] = [None] * len(self.attn_heads)
@@ -564,23 +605,28 @@ class ECAL_GPT(nn.Module):
             # Vocab LoRA modules or new heads
             if self.enable_vocab_LoRA:
                 vocab_r = int(self.LoRA_r * self.vocab_LoRA_scale)
-                vocab_alpha = int(self.LoRA_alpha * self.vocab_LoRA_scale / 2)
+                vocab_alpha = int(self.LoRA_alpha * self.vocab_LoRA_scale / 4)
                 print(f"Creating Vocab LoRA modules for particle type: {particle}. LoRA_r={vocab_r}, LoRA_alpha={vocab_alpha}, vocab_LoRA_scale={vocab_alpha/np.sqrt(vocab_r)} ")
                 pixel_weight = weights['logits_head'] if weights else None
                 energy_weight = weights['energy_head'] if weights else None
                 self.vocab_LoRA[particle] = nn.ModuleList([Vocab_LoRA(vocab_size=self.space_vocab, embed_dim=self.embed_dim, lora_r=vocab_r, weight=pixel_weight, alpha=vocab_alpha, drop_rate=self.drop_rates[0], device=self.device, pissa_init=pissa_init),
                                                             Vocab_LoRA(vocab_size=self.energy_vocab, embed_dim=self.embed_dim, lora_r=vocab_r, weight=energy_weight, alpha=vocab_alpha, drop_rate=self.drop_rates[0], device=self.device, pissa_init=pissa_init)])       
-            else:
+            elif self.learnable_vocabs:
                 print("Creating new vocab heads for particle type: ", particle)
                 self.vocab_LoRA[particle] = nn.ModuleList([nn.Linear(self.embed_dim, self.space_vocab), nn.Linear(self.embed_dim, self.energy_vocab)])  # Train new heads
-            
+            else:
+                print("Vocab heads inhereted for particle type: ", particle, ". These remain frozen during fine-tuning.")
+
             # Embedding adapter modules
             if self.enable_embedding_adapter:
+                init_e_adapter = ConditionedAdapter(self.embed_dim)
                 embedding_adapter_list = nn.ModuleList([
                     ConditionedAdapter(self.embed_dim) for _ in range(2)])  # 2 embedding modules: token and energy
                 self.embedding_adapter[particle] = embedding_adapter_list
+                self.init_e_adapter[particle] = init_e_adapter
 
         # Check and register modules 
+
         for particle, lora_list in self.particle_lora.items():
             if isinstance(lora_list, nn.ModuleList):
                 self.add_module(f"particle_lora_{particle}", lora_list)
@@ -588,6 +634,10 @@ class ECAL_GPT(nn.Module):
         for particle, embedding_adapter_list in self.embedding_adapter.items():
             if isinstance(embedding_adapter_list, nn.ModuleList):
                 self.add_module(f"embedding_adapter_{particle}", embedding_adapter_list)
+
+        for particle, init_e_adapter in self.init_e_adapter.items():
+            if isinstance(init_e_adapter, ConditionedAdapter):
+                self.add_module(f"init_e_adapter_{particle}", init_e_adapter)
         
         for particle, vocab_lora_module in self.vocab_LoRA.items():
             if isinstance(vocab_lora_module, nn.ModuleList):
@@ -660,7 +710,16 @@ class ECAL_GPT(nn.Module):
         
         return cache_list
 
-    def extend_model(self, new_material_list,closest_expert=None,particle_type="e-",weights=None,pissa_init=False):
+    def extend_sequence_length(self, new_seq_len):
+        # Extend model to longer sequence lengths via expansion and masking
+        pos_weight = self.lpe_expansion_pos.pos_embedding.weight.data if self.lpe_expansion_pos is not None else self.pos_embedding.weight.data
+        energy_weight = self.lpe_expansion_energy.pos_embedding.weight.data if self.lpe_expansion_energy is not None else self.energy_pos_embedding.weight.data
+        self.__build_LPE_expansion(new_seq_len, pos_weight=pos_weight, energy_weight=energy_weight)
+        self.seq_len = new_seq_len
+        self.lpe_newly_created = True
+        print(f"Extended model to new sequence length: {new_seq_len}. Added LPE expansion module.")
+
+    def extend_model(self, new_material_list,closest_expert=None,particle_type="e-",weights=None,pissa_init=False,new_seq_len=None):
         # Extend model to an additional material/particle combo by adding experts and updating the router
         # This is done for a specific particle type e.g., G4_W_gamma
         # Assumes experts per class is constant 
@@ -814,7 +873,10 @@ class ECAL_GPT(nn.Module):
             e_embed = self.energy_embedding(e)
 
         if not self.use_RoPE: # Add absolute positional embeddings if not using RoPE
-            e_embed = e_embed + self.energy_pos_embedding(pos)
+            if self.lpe_expansion_energy is not None: # Continually expanded
+                e_embed = e_embed + self.lpe_expansion_energy(pos)
+            else: # Base
+                e_embed = e_embed + self.energy_pos_embedding(pos) 
 
         e_embed = self.embedding_adapter[particle_type][1](e_embed) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_embed
 
@@ -829,9 +891,14 @@ class ECAL_GPT(nn.Module):
         # Embed to (B, embed_dim) then add a time-step dimension -> (B, 1, embed_dim)
         initial_energy_embed = self.initial_energy_embedding(initial_energy).view(batch_size, 1, -1)  # (B, 1, E)
 
+        initial_energy_embed = self.init_e_adapter[particle_type](initial_energy_embed) if (hasattr(self, 'init_e_adapter') and particle_type in self.init_e_adapter) else initial_energy_embed
+
         # Apply adaptations to embeddings if applicable
         if not self.use_RoPE:
-            x = self.token_embedding(x) + self.pos_embedding(pos)
+            if self.lpe_expansion_pos is not None: # Continually expanded
+                x = self.token_embedding(x) + self.lpe_expansion_pos(pos)
+            else: # Base 
+                x = self.token_embedding(x) + self.pos_embedding(pos)
         else:
             x = self.token_embedding(x)
         
@@ -947,6 +1014,8 @@ class ECAL_GPT(nn.Module):
             initial_energy = initial_energy.unsqueeze(1)
         init_e_embed = self.initial_energy_embedding(initial_energy).unsqueeze(1)
 
+        init_e_embed = self.init_e_adapter[particle_type](init_e_embed) if (hasattr(self, 'init_e_adapter') and particle_type in self.init_e_adapter) else init_e_embed
+
         is_done = torch.zeros(B, dtype=torch.bool, device=device)
 
         # Pre-allocate output tensors
@@ -978,8 +1047,10 @@ class ECAL_GPT(nn.Module):
 
                 # Adjust temperature if dynamic
                 if dynamic_temp:
+                    # temperature = self.__linear_dynamic_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     # temperature = self.__increasing_exp_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
+                    # temperature = self.__exp_dynamic_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     #print(f"Step {step}: temperature={temperature:.4f}")
 
                 if use_kv_cache:
@@ -991,7 +1062,10 @@ class ECAL_GPT(nn.Module):
                         sos_embed = self.token_embedding(idx_buffer[:, 0:1]) 
                         
                         if not self.use_RoPE:
-                            sos_embed = sos_embed + self.pos_embedding(pos_idx)
+                            if self.lpe_expansion_pos is not None: # Continually expanded
+                                sos_embed = sos_embed + self.lpe_expansion_pos(pos_idx)
+                            else: # Base
+                                sos_embed = sos_embed + self.pos_embedding(pos_idx)
 
                         sos_embed = self.embedding_adapter[particle_type][0](sos_embed) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else sos_embed
                         
@@ -1005,7 +1079,10 @@ class ECAL_GPT(nn.Module):
                             e_sos = self.energy_embedding(e_buffer[:, 0:1].reshape(-1, 1)).view(B, 1, -1) 
 
                         if not self.use_RoPE:
-                            e_sos = e_sos + self.energy_pos_embedding(pos_idx)
+                            if self.lpe_expansion_energy is not None: # Continually expanded
+                                e_sos = e_sos + self.lpe_expansion_energy(pos_idx)
+                            else: # Base
+                                e_sos = e_sos + self.energy_pos_embedding(pos_idx)
                         
                         # Adapter on embeddings if avail
                         e_sos = self.embedding_adapter[particle_type][1](e_sos) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_sos
@@ -1018,7 +1095,10 @@ class ECAL_GPT(nn.Module):
                         x_t = self.token_embedding(idx_buffer[:, step:step+1]) 
 
                         if not self.use_RoPE:
-                            x_t = x_t + self.pos_embedding(pos_idx)
+                            if self.lpe_expansion_pos is not None: # Continually expanded
+                                x_t = x_t + self.lpe_expansion_pos(pos_idx)
+                            else: # Base
+                                x_t = x_t + self.pos_embedding(pos_idx)
 
                         # Adapter on embeddings if avail
                         x_t = self.embedding_adapter[particle_type][0](x_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else x_t
@@ -1029,7 +1109,10 @@ class ECAL_GPT(nn.Module):
                             e_t = self.energy_embedding(e_buffer[:, step:step+1].reshape(-1, 1)).view(B, 1, -1)
 
                         if not self.use_RoPE:
-                            e_t = e_t + self.energy_pos_embedding(pos_idx)
+                            if self.lpe_expansion_energy is not None: # Continually expanded
+                                e_t = e_t + self.lpe_expansion_energy(pos_idx)
+                            else: # Base
+                                e_t = e_t + self.energy_pos_embedding(pos_idx)
 
                         # Adapter on embeddings if avail
                         e_t = self.embedding_adapter[particle_type][1](e_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_t

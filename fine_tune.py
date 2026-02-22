@@ -25,7 +25,7 @@ from dataloader.tokenizer import EnergyTokenizer
 from dataloader.dataset import ECAL_Chunked_Dataset
 from dataloader.dataloader import CreateLoaderMoE
 
-from models.GPT_RoPE import ECAL_GPT
+from models.GPT import ECAL_GPT
 from models.MoE import MoE
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -34,7 +34,7 @@ warnings.filterwarnings("ignore", message=".*weights_only.*")
 
 
 def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma','G4_Ta_gamma'],material_to_add=None,
-                 closest_expert=None,base_particle_list=None,particle_type=None,enable_pissa=False):
+                 closest_expert=None,base_particle_list=None,particle_type=None,enable_pissa=False,new_seq_len=None):
 
     assert material_to_add is not None, "Material to add for fine-tuning must be specified."
 
@@ -56,9 +56,11 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
     loRA_alpha = config['model']['LoRA_alpha']
     enable_head_LoRA = config['model']['enable_head_LoRA']
     enable_vocab_LoRA = config['model']['enable_vocab_LoRA']
+    learnable_vocabs = config['model']['learnable_vocabs']
     enable_embedding_adapter = config['model']['enable_embedding_adapter']
     vocab_LoRA_scale = config['model']['vocab_LoRA_scale']
     use_RoPE = config['model']['use_RoPE']
+    is_expanded = config['model']['is_expanded']
 
     if fine_tune_path is not None:
         print("Loading pre-trained model from: ", fine_tune_path)
@@ -89,13 +91,17 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
                 base_model_type=config['base_model_type'],
                 enable_head_LoRA=enable_head_LoRA,
                 enable_vocab_LoRA=enable_vocab_LoRA,
+                learnable_vocabs=learnable_vocabs,
                 enable_embedding_adapter=enable_embedding_adapter,
                 vocab_LoRA_scale=vocab_LoRA_scale,
-                use_RoPE=use_RoPE)
+                use_RoPE=use_RoPE,
+                is_expanded=is_expanded)
                 # Base model - This is what we have trained on first, ever
                 # If we fine tune from W_gamma -> W_e-, then base_model_type='gamma' but base_particle_list=['gamma','e-']
                 # So model knows for e- to use LoRA + experts for e- and just experts for gamma if we fine tune to say G4_Pb_gamma
                 
+
+
     if state_dict:
         print("Loding state dict into model...")
         net.load_state_dict(state_dict,strict=False)
@@ -110,6 +116,28 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
 
     experts_per_class = net.num_experts // len(default_material_list)
     net.extend_model(materials_list + [material_to_add], closest_expert=closest_expert, particle_type=particle_type, weights=weights, pissa_init=enable_pissa)
+
+    if new_seq_len is not None:
+        assert new_seq_len > msl, "New sequence length must be greater than the current maximum sequence length."
+        
+        print("Extending sequence length to:", new_seq_len)
+        net.extend_sequence_length(new_seq_len)
+        print("\n========= Sequence Adapater Check ==========")
+        old_e_weight = net.energy_pos_embedding.weight.data
+        old_p_weight = net.pos_embedding.weight.data
+
+        new_e_weight = net.lpe_expansion_energy.pos_embedding.weight[:old_e_weight.shape[0]].data
+        new_p_weight = net.lpe_expansion_pos.pos_embedding.weight[:old_p_weight.shape[0]].data
+
+        are_same_e = torch.allclose(old_e_weight, new_e_weight, rtol=1e-5)
+        are_same_p = torch.allclose(old_p_weight, new_p_weight, rtol=1e-5)
+        print(f"Energy Positional Embedding: New vs Old: {'MATCH' if are_same_e else 'DO NOT MATCH'}")
+        print(f"Positional Embedding: New vs Old: {'MATCH' if are_same_p else 'DO NOT MATCH'}")
+        print("=============================================")
+    else:
+        print("Using existing sequence length:", msl)
+
+
 
     print("\n========= New Expert Weight Check =========")
     for layer_idx, layer in enumerate(net.layers):
@@ -130,7 +158,7 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
             print(f"Layer {layer_idx}: New expert (idx={len(layer.FF.experts)-1}) vs Source expert '{closest_expert}' (idx={source_idx}): {'MATCH' if are_same else 'DO NOT MATCH'}")
     print("==========================================\n")
 
-    if not net.enable_vocab_LoRA:
+    if not net.enable_vocab_LoRA and net.learnable_vocabs:
         print("\n========= New Vocab Projection Check =========")
         old_space_w = net.logits_head.weight.data
         old_space_b = net.logits_head.bias.data
@@ -157,7 +185,7 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
     return net 
 
 class Trainer:
-    def __init__(self, config, rank, world_size, model, default_material_list=None, material_to_add=None, particle_type="gamma"):
+    def __init__(self, config, rank, world_size, model, default_material_list=None, material_to_add=None, particle_type="gamma",new_seq_len=None):
         self.rank = rank
         self.world_size = world_size
         self.config = config
@@ -182,7 +210,7 @@ class Trainer:
         self.SOS_token = config['special_tokens']['SOS_token']
         self.EOS_token = config['special_tokens']['EOS_token']
         self.stats = config['stats']
-        self.max_seq_length = config['model']['max_seq_length']
+        self.max_seq_length = config['model']['max_seq_length'] if new_seq_len is None else new_seq_len
         # Pass through args, or config material list
         if default_material_list is None:
             self.material_list = config['material_list']
@@ -199,6 +227,7 @@ class Trainer:
             print("========= Special Tokens ============")
             print(f"Pixels - Pad: {self.pad_token}, SOS: {self.SOS_token}, EOS: {self.EOS_token}")
             print(f"Energy   - Pad: {self.energy_pad_token}, SOS: {self.SOS_token}, EOS: {self.energy_EOS_token}")
+            print(f"Max Sequence Length: {self.max_seq_length}")
             print("=====================================")
 
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.pad_token)
@@ -255,7 +284,7 @@ class Trainer:
     def freeze_model(self, model):
         # Decide if we freeze LoRA as well
         use_lora = (self.particle_type != model.base_model_type)
-        lora_exists = not model.lora_newly_created 
+        lora_exists = not model.lora_newly_created
 
         # Get the material list - last material is the new one
         new_material_idx = len(model.material_list) - 1
@@ -307,6 +336,16 @@ class Trainer:
                     keep_trainable = True
                     trainable_names.append(name)
 
+            # Check init_e_adapter freeze condition
+            if "init_e_adapter" in name:
+                if lora_exists:
+                    # Adapter already trained, freeze it for new materials
+                    keep_trainable = False
+                else:
+                    # First time training adapter for this particle
+                    keep_trainable = True
+                    trainable_names.append(name)
+
             # Check Embedding LoRA freeze condition
             if "embedding_adapter" in name:
                 if lora_exists:
@@ -326,6 +365,15 @@ class Trainer:
                     # First time training LoRA for this particle
                     keep_trainable = True
                     trainable_names.append(name)
+
+            if "lpe_expansion" in name:
+                if hasattr(self.model, "lpe_newly_created") and self.model.lpe_newly_created:
+                    # LPE newly created, train it for new materials
+                    keep_trainable = True
+                    trainable_names.append(name)
+                else:
+                    # LPE already trained, freeze it for new materials
+                    keep_trainable = False
 
             # Freeze everything else (attention, embeddings, old experts, etc.)
             param.requires_grad = keep_trainable
@@ -525,7 +573,7 @@ class Trainer:
             }, filename)
 
 def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tune_path=None, default_material_list=None, material_to_add=None, closest_expert=None, run_val=False, write_path=None, checkpoint=None,
-               base_particle_list=["gamma"], particle_type='gamma', enable_pissa=False, n_events=None,dataset_seed=42):
+               base_particle_list=["gamma"], particle_type='gamma', enable_pissa=False, n_events=None,dataset_seed=42,new_seq_len=None):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
@@ -548,9 +596,9 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, fine_tu
     print(f"Rank {rank} - Starting training with {num_files} files, chunk size: {chunk_size}, num epochs: {num_epochs}")
 
     model = create_model(config, fine_tune_path=fine_tune_path, default_material_list=default_material_list, material_to_add=material_to_add, closest_expert=closest_expert,
-                         base_particle_list=base_particle_list, particle_type=particle_type,enable_pissa=enable_pissa)
+                         base_particle_list=base_particle_list, particle_type=particle_type,enable_pissa=enable_pissa,new_seq_len=new_seq_len)
     trainer = Trainer(config, rank, world_size, model, default_material_list=default_material_list, material_to_add=material_to_add, 
-                      particle_type=particle_type)
+                      particle_type=particle_type,new_seq_len=new_seq_len)
 
     if checkpoint is not None:
         if 'net_state_dict' in checkpoint:
@@ -624,7 +672,7 @@ def read_text(file_path):
         raise ValueError(f"Error: The file '{file_path}' was not found.")
 
 def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_path=None, material_to_add=None, 
-         closest_expert=None, base_particle_list=["gamma"], particle_type="gamma", enable_pissa=False, n_events=None,dataset_seed=42):
+         closest_expert=None, base_particle_list=["gamma"], particle_type="gamma", enable_pissa=False, n_events=None,dataset_seed=42,new_seq_len=None):
     
     if n_events is not None:
         print(f"Fine-tuning on a subset of {n_events} events.")
@@ -671,8 +719,13 @@ def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_pat
     val_files += read_text(config['dataset']['validation'][material_to_add + '_val_files'])
 
     if args.n_events is not None:
+        # 10k is rough limit, this currently breaks at multiples of 10k
         n_events_per_file = config['dataset']['tracks_per_file']
         n_files_needed = math.ceil(args.n_events / n_events_per_file)
+        
+        if args.n_events % n_events_per_file == 0:
+            n_files_needed += 1  # To ensure we have enough events
+
         random_idx = np.random.permutation(len(train_files))[:n_files_needed]
         train_files = [train_files[i] for i in random_idx]
 
@@ -693,7 +746,8 @@ def main(config,default_material_list=["G4_W_gamma","G4_Ta_gamma"],fine_tune_pat
                particle_type=particle_type,
                enable_pissa=enable_pissa,
                n_events=n_events,
-               dataset_seed=dataset_seed)
+               dataset_seed=dataset_seed,
+               new_seq_len=new_seq_len)
 
 if __name__=='__main__':
     # PARSE THE ARGS
@@ -715,8 +769,9 @@ if __name__=='__main__':
                         help='Enable PiSSA weight initialization for vocab LoRA modules.')
     parser.add_argument('--n_events', type=int, default=None, help='Number of events to use for fine-tuning.')
     parser.add_argument('--dataset_seed', type=int, default=42, help='Random seed for dataset shuffling (default: 42)')
-    args = parser.parse_args()
+    parser.add_argument('--new_seq_len', type=int, default=None, help='New sequence length for fine-tuning (default: None)')
 
+    args = parser.parse_args()
     config = json.load(open(args.config))
 
-    main(config,args.default_material_list,args.fine_tune_path,args.material_to_add,args.closest_expert,args.base_particle_list,args.particle_type,args.enable_pissa,args.n_events,args.dataset_seed)
+    main(config,args.default_material_list,args.fine_tune_path,args.material_to_add,args.closest_expert,args.base_particle_list,args.particle_type,args.enable_pissa,args.n_events,args.dataset_seed,args.new_seq_len)

@@ -20,14 +20,14 @@ from torch.nn.parallel import DistributedDataParallel
 warnings.filterwarnings("ignore", message=".*weights_only.*")
 
 from plotting import make_plots, visualize_vocab_LoRA
-from models.GPT_RoPE import ECAL_GPT
+from models.GPT import ECAL_GPT
 from dataloader.tokenizer import EnergyTokenizer
 from dataloader.dataset import ECAL_Chunked_Dataset
 from dataloader.dataloader import CreateDistInferenceLoader
 from utils.utils import read_text, singular_value_checks
 
 
-def create_model(config):
+def create_model(config,expanded_seq_len=None):
     # Model params.
     vocab_size = config['model']['vocab_size']
     energy_vocab = config['model']['energy_vocab']
@@ -38,16 +38,31 @@ def create_model(config):
     mlp_scale = config['model']['mlp_scale']
     msl = config['model']['max_seq_length']
     drop_rates = config['model']['drop_rates']
-    materials_list = config['material_list']
-    num_experts = len(materials_list)
-    use_MoE = config['model']['use_MoE']
-    digitize_energy = config['digitize_energy']
+    material_list = config['material_list']
+    num_experts = len(material_list)
+    use_MoE = bool(config['model']['use_MoE'])
+    digitize_energy = bool(config['digitize_energy'])
+    use_kv_cache = bool(args.use_kv_cache)
+    base_model_type = config['base_model_type']
+    particle_list = config['particle_list']
+    loRA_r = config['model']['LoRA_r']
+    loRA_alpha = config['model']['LoRA_alpha']
+    enable_head_LoRA = config['model']['enable_head_LoRA']
+    enable_vocab_LoRA = config['model']['enable_vocab_LoRA']
+    enable_embedding_adapter = config['model']['enable_embedding_adapter']
+    vocab_LoRA_scale = config['model']['vocab_LoRA_scale']
     use_RoPE = config['model']['use_RoPE']
     
+    if expanded_seq_len is not None:
+        msl = expanded_seq_len
+        is_expanded = True
+    else:
+        is_expanded = False
+    
     net = ECAL_GPT(vocab_size,
-                   msl,
-                   embed_dim,
-                   attn_heads=attn_heads,
+                msl,
+                embed_dim,
+                attn_heads=attn_heads,
                 num_blocks=num_blocks,
                 hidden_units=hidden_units,
                 digitize_energy=digitize_energy,
@@ -56,8 +71,17 @@ def create_model(config):
                 drop_rates=drop_rates,
                 use_MoE=use_MoE,
                 num_experts=num_experts,
-                material_list=materials_list,
-                use_RoPE=use_RoPE)
+                material_list=material_list,
+                base_model_type=base_model_type,
+                particle_list=particle_list,
+                LoRA_r=loRA_r,
+                LoRA_alpha=loRA_alpha,
+                enable_head_LoRA=enable_head_LoRA,
+                enable_vocab_LoRA=enable_vocab_LoRA,
+                enable_embedding_adapter=enable_embedding_adapter,
+                vocab_LoRA_scale=vocab_LoRA_scale,
+                use_RoPE=use_RoPE, is_expanded=is_expanded
+                )
 
     return net 
 
@@ -71,7 +95,7 @@ class Generator:
         self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[rank])
         self.args = args
         self.stats = config['stats']
-        self.max_seq_length = config['model']['max_seq_length']
+        self.max_seq_length = config['model']['max_seq_length'] if args.gen_seq_len is None else args.gen_seq_len
         self.material_list = config['material_list']
         self.digitize_energy = config['digitize_energy']
         self.energy_vocab = config['model']['energy_vocab']
@@ -100,6 +124,8 @@ class Generator:
             print("Temperature: ", self.args.temperature) if not self.args.dynamic_temp else print("Dynamic Temperature: Enabled")
             print("Generating showers for materials: ", self.args.materials_to_generate)
             print("Number of showers to generate: ", self.args.num_showers)
+            print("Maximum sequence length for generation: ", self.max_seq_length)
+            print("Maximum model sequence length: ", args.expanded_seq_len if args.gen_seq_len is not None else config['model']['max_seq_length'])
             print("=====================================")
 
         # choose compact dtypes safely
@@ -109,7 +135,8 @@ class Generator:
         else:
             self.energy_dtype = np.float32
 
-        outfile = os.path.join("Generations", self.args.output_file if self.args.output_file is not None else self.config['Inference']['output_file'])
+        # Will remove this crime later - k8s giving permission errors and don't feel like debugging right now
+        outfile = os.path.join("/sciclone/scr30/jgiroux/FM4CAL/Generations", self.args.output_file if self.args.output_file is not None else self.config['Inference']['output_file'])
         outfile = outfile.replace('.h5', f'_rank{self.rank}.h5')
         self.w = ShowerWriterCompound(outfile, token_dtype=self.token_dtype,
                             energy_dtype=self.energy_dtype, compression="lzf")
@@ -300,7 +327,7 @@ def run_worker(rank, world_size, config, file_list, particle_type, args):
     model_path = config['Inference']['model_path'] if args.model_path is None else args.model_path
     checkpoint = torch.load(model_path, map_location=torch.device(f'cuda:{rank}'))   
 
-    model = create_model(config)
+    model = create_model(config, expanded_seq_len=args.expanded_seq_len)
     try:
         model.load_state_dict(checkpoint["net_state_dict"],strict=True)
     except Exception as e:
@@ -314,6 +341,21 @@ def run_worker(rank, world_size, config, file_list, particle_type, args):
         global_step = checkpoint.get("global_step", 0)
         print(f"Loaded model at epoch {startEpoch}, global_step {global_step}")
 
+        for name, param in model.named_parameters():
+            if "lpe_expansion" in name:
+                print(f"LPE Expansion Parameter {name} has length: {param.shape} and value: {param.mean().data.cpu().numpy()}")
+                lpe_expansion_weight = param.data
+                if "pos" in name and not "energy" in name:
+                    orig_weight = model.pos_embedding.weight.data
+                elif "energy" in name:
+                    orig_weight = model.energy_pos_embedding.weight.data
+                else:
+                    print("Unknown LPE expansion type in name: ", name)
+                    continue
+
+                check_ = torch.allclose(lpe_expansion_weight[:orig_weight.shape[0]], orig_weight, atol=1e-5)
+                print(f"Check if LPE expansion weight matches original positional embedding for first {orig_weight.shape[0]} tokens: {check_}")
+                
 
     Generator_instance = Generator(config, rank, world_size, model, args)
     flush_size = config['Inference']['flush_size']
@@ -443,9 +485,11 @@ if __name__ == "__main__":
     parser.add_argument('--inference_only', action='store_true', help='If set, only runs inference and plotting without generation. Assumes output file already exists.')
     parser.add_argument('--particle_list', type=str, nargs='+', default=None, help='List of particles to use. Overrides config if set.')
     parser.add_argument('--material_list', type=str, nargs='+', default=None, help='List of materials to use. Overrides config if set.')
+    parser.add_argument('--expanded_seq_len', type=int, default=None, help='If set, expands the model sequence length to this value. Overrides config if set.')
+    parser.add_argument('--gen_seq_len', type=int, default=None, help='Maximum sequence length for generation. Overrides config if set.')
     args = parser.parse_args()
 
-    os.makedirs("Generations", exist_ok=True)
+    # os.makedirs("Generations", exist_ok=True)
 
     # Load config
     with open(args.config, 'r') as f:

@@ -25,7 +25,7 @@ from dataloader.tokenizer import EnergyTokenizer
 from dataloader.dataset import ECAL_Chunked_Dataset
 from dataloader.dataloader import CreateLoaderMoE
 
-from models.GPT_RoPE import ECAL_GPT
+from models.GPT import ECAL_GPT
 import torch.multiprocessing as mp
 import torch.distributed as dist
 

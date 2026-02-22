@@ -34,23 +34,24 @@ spec:
 
           for RUN_NUM in {1..10}; do
             echo "=========================================="
-            echo "Starting run $RUN_NUM / 10 (n_events=1000)"
+            echo "Starting run $RUN_NUM / 10 (n_events=10000)"
             echo "=========================================="
             
             DATASET_SEED=$(date +%s%N | tail -c 10)
-            torchrun --nproc-per-node=4 /sciclone/home/jgiroux/FM4CAL/fine_tune.py \
+            torchrun --nproc-per-node=2 /sciclone/home/jgiroux/FM4CAL/fine_tune.py \
               --config /sciclone/home/jgiroux/FM4CAL/config/CA_config_dist_copy.json \
-              --default_material_list "G4_W_gamma" "G4_Ta_gamma" \
+              --default_material_list "G4_W_gamma" "G4_Ta_gamma"\
               --material_to_add "G4_Pb_gamma" \
               --closest_expert "G4_Ta_gamma" \
               --base_particle_list "gamma" \
               --particle_type "gamma" \
-              --n_events 1000 \
+              --n_events 10000 \
+              --new_seq_len 2100 \
               --dataset_seed $DATASET_SEED \
-              --fine_tune_path /sciclone/data10/jgiroux/ECAL_Cole/ECAL_Models/Restart_APE_Model___Feb-04-2026/Epoch10_loss_9.690241.pth \
-              > /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_1000Events_${RUN_NUM}.txt 2>&1
+              --fine_tune_path /sciclone/data10/jgiroux/ECAL_Cole/ECAL_Models/APE_BaseModel_1800Seq_40Batch___Feb-17-2026/Epoch05_loss_9.690466.pth \
+              > /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_LPE_G4_Pb_gamma_10000Events_${RUN_NUM}.txt 2>&1
             
-            CKPT_PATH=$(grep "FINAL_CHECKPOINT_PATH=" /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_1000Events_${RUN_NUM}.txt | tail -1 | cut -d'=' -f2)
+            CKPT_PATH=$(grep "FINAL_CHECKPOINT_PATH=" /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_LPE_G4_Pb_gamma_10000Events_${RUN_NUM}.txt | tail -1 | cut -d'=' -f2)
     
             if [ -z "$CKPT_PATH" ]; then
               echo "Could not find FINAL_CHECKPOINT_PATH in logs, prepare for breakage..."
@@ -61,22 +62,24 @@ spec:
             echo "Using checkpoint for generation: $CKPT_PATH"
             echo "================================================"
 
-            torchrun --nproc-per-node=4 /sciclone/home/jgiroux/FM4CAL/generate_dist.py \
+            torchrun --nproc-per-node=2 /sciclone/home/jgiroux/FM4CAL/generate_dist.py \
               --config /sciclone/home/jgiroux/FM4CAL/config/CA_config_dist_copy.json \
               --material_list "G4_W_gamma" "G4_Ta_gamma" "G4_Pb_gamma" \
-              --output_file "FineTune_APE_Epoch10_Pb_1000Events_${RUN_NUM}.h5" \
+              --particle_list "gamma" \
+              --output_file "APE_FineTune_LPE_G4_Pb_gamma_10000Events_${RUN_NUM}.h5" \
               --inference_only \
               --model_path "$CKPT_PATH" \
               --use_kv_cache \
               --use_amp \
               --materials_to_generate "G4_Pb_gamma" \
-              --dynamic_temp \
-              >> /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_1000Events_${RUN_NUM}.txt 2>&1
+              --gen_seq_len 2100 \
+              --expanded_seq_len 2100 \
+              >> /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_LPE_G4_Pb_gamma_10000Events_${RUN_NUM}.txt 2>&1
 
             # Check exit code
             if [ $? -ne 0 ]; then
-              echo "❌ Generation failed for run $RUN_NUM! Check logs:"
-              echo "/sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_Pb_gamma_1000Events_${RUN_NUM}.txt"
+              echo "Generation failed for run $RUN_NUM! Check logs:"
+              echo "/sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_LPE_G4_Pb_gamma_10000Events_${RUN_NUM}.txt"
               exit 1
             fi
 
@@ -88,17 +91,24 @@ spec:
         requests:
           cpu: "31"
           memory: "250Gi"
-          nvidia.com/gpu: "4"
+          nvidia.com/gpu: "2"
         limits:
           cpu: "31"
           memory: "250Gi"
-          nvidia.com/gpu: "4"
+          nvidia.com/gpu: "2"
       securityContext:
         runAsUser: 255610
         runAsGroup: 50027
+  tolerations:
+    - key: "node"
+      operator: "Equal"
+      value: aiphys
+      effect: "NoSchedule"
   nodeSelector:
-    kubernetes.io/hostname: ts4.sciclone.wm.edu
-    nvidia.com/gpu.product: "Quadro-RTX-6000"
+    kubernetes.io/hostname: aiphys-node1.sciclone.wm.edu
+    nvidia.com/gpu.product: "NVIDIA-L40S"
+    # kubernetes.io/hostname: ts4.sciclone.wm.edu
+    # nvidia.com/gpu.product: "Quadro-RTX-6000"
   volumes:
     - name: nsf
       nfs:

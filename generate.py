@@ -61,6 +61,8 @@ def main(config,args):
     enable_embedding_adapter = config['model']['enable_embedding_adapter']
     vocab_LoRA_scale = config['model']['vocab_LoRA_scale']
     use_RoPE = config['model']['use_RoPE']
+    learnable_vocabs = config['model']['learnable_vocabs']
+    is_expanded = config['model']['is_expanded']
 
     energy_res = config['stats']['token_energy_res']
     e_max = config['stats']['token_energy_max']
@@ -120,7 +122,8 @@ def main(config,args):
                 enable_vocab_LoRA=enable_vocab_LoRA,
                 enable_embedding_adapter=enable_embedding_adapter,
                 vocab_LoRA_scale=vocab_LoRA_scale,
-                use_RoPE=use_RoPE
+                learnable_vocabs=learnable_vocabs,
+                use_RoPE=use_RoPE,is_expanded=is_expanded
                 ).to(args.device)
 
     model_path = config['Inference']['model_path'] if args.model_path is None else args.model_path
@@ -177,6 +180,21 @@ def main(config,args):
     print("Particle type", particle_type)
 
     for name, param in model.named_parameters():
+        if "lpe_expansion" in name:
+            print(f"LPE Expansion Parameter {name} has length: {param.shape} and value: {param.mean().data.cpu().numpy()}")
+            lpe_expansion_weight = param.data
+            if "pos" in name and not "energy" in name:
+                orig_weight = model.pos_embedding.weight.data
+            elif "energy" in name:
+                orig_weight = model.energy_pos_embedding.weight.data
+            else:
+                print("Unknown LPE expansion type in name: ", name)
+                continue
+
+            check_ = torch.allclose(lpe_expansion_weight[:orig_weight.shape[0]], orig_weight, atol=1e-5)
+            print(f"Check if LPE expansion weight matches original positional embedding for first {orig_weight.shape[0]} tokens: {check_}")
+            
+    for name, param in model.named_parameters():
         if particle_type in name:
             print(f"Parameter {name} has value: {param.mean().data.cpu().numpy()}")
 
@@ -220,7 +238,9 @@ def main(config,args):
     # test_files = test_files[:2] + test_files[-2:]  # for quick testing
     # test_files = test_files[:2] # for quick testing
 
-    dataset = ECAL_Chunked_Dataset(test_files,max_seq_length=msl,
+    gen_seq_len = args.gen_seq_len if args.gen_seq_len is not None else msl
+
+    dataset = ECAL_Chunked_Dataset(test_files,max_seq_length=gen_seq_len,
                 energy_digitizer=energy_digitizer,verbose=True,
                 ordering='energy',
                 material_list=material_list,
@@ -263,7 +283,7 @@ def main(config,args):
                         material_index=material_index,
                         method=args.sampling_method,
                         dynamic_temp=args.dynamic_temp,
-                        max_seq_len=msl,
+                        max_seq_len=gen_seq_len,
                         temperature=args.temperature,
                         use_kv_cache=args.use_kv_cache,particle_type=particle_type    
                     )
@@ -273,7 +293,7 @@ def main(config,args):
                     material_index=material_index,
                     method=args.sampling_method,
                     dynamic_temp=args.dynamic_temp,
-                    max_seq_len=msl,
+                    max_seq_len=gen_seq_len,
                     temperature=args.temperature,
                     use_kv_cache=args.use_kv_cache,particle_type=particle_type
                 )
@@ -405,6 +425,7 @@ if __name__ == "__main__":
     parser.add_argument('--inference_only', action='store_true', help='If set, only runs inference and plotting without generation. Assumes output file already exists.')
     parser.add_argument('--particle_list', type=str, nargs='+', default=None, help='List of particles to use. Overrides config if set.')
     parser.add_argument('--material_list', type=str, nargs='+', default=None, help='List of materials to use. Overrides config if set.')
+    parser.add_argument('--gen_seq_len', type=int, default=None, help='Sequence length to use during generation. Overrides max_seq_length in config if set.')
     args = parser.parse_args()
 
     os.makedirs("Generations", exist_ok=True)

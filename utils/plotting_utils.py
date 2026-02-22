@@ -942,11 +942,12 @@ def read_and_filter_energies(comp_path,min_threshold=1e-15,max_threshold=35.0):
     y = ak_array['y']
     z = ak_array['z']
 
-    mask = (energies >= min_threshold) & (energies <= max_threshold)
-    filtered_energies = energies[mask]
-    filtered_x = x[mask]
-    filtered_y = y[mask]
-    filtered_z = z[mask]
+    # Not used anymore, should rename function at some point
+    # mask = (energies >= min_threshold) & (energies <= max_threshold)
+    # filtered_energies = energies[mask]
+    filtered_x = x#[mask]
+    filtered_y = y#[mask]
+    filtered_z = z#[mask]
 
     return ak.Array({"energy": filtered_energies,"x": filtered_x, "y": filtered_y, "z": filtered_z})
 
@@ -1034,3 +1035,68 @@ def read_and_filter_energies(comp_path,min_threshold=1e-15,max_threshold=35.0):
 #             clip_on=False,
 #             linestyle="None",
 #         )
+
+def plot_ratios_np(ax_twin, gen, truth, bins, labels, color, mask, i=1):
+    mean,std = gen 
+    truth_mean, std_t = truth
+
+    x_vals = (bins[:-1] + bins[1:]) / 2  # bin centers
+    n = min(len(mean), len(truth_mean), len(std), len(std_t), len(x_vals))
+    mean = mean[:n]
+    std = std[:n]
+    truth_mean = truth_mean[:n]
+    std_t = std_t[:n]
+    x_vals = x_vals[:n]
+
+    y_vals = mean / (truth_mean + 1e-8)
+
+    delta_A = std / (truth_mean + 1e-8)
+    delta_B = (mean * std_t) / (truth_mean + 1e-8)**2
+    y_unc = np.sqrt(delta_A**2 + delta_B**2)
+
+    y_unc = np.where(np.isnan(y_unc), 0, y_unc)
+    
+    step_where = "mid"
+
+    ax_twin.step(x_vals, y_vals, where=step_where, color=color, linestyle="-",lw=2)
+
+    valid_mask = ~np.isnan(y_vals)
+    in_bounds_mask = (y_vals >= mask[0]) & (y_vals <= mask[1])
+    combined_mask = valid_mask & in_bounds_mask
+
+    y_vals_filtered = y_vals[combined_mask]
+    y_unc_filtered = y_unc[combined_mask]
+    x_vals_filtered = x_vals[combined_mask]
+    
+    ax_twin.fill_between(
+        x_vals_filtered,
+        y_vals_filtered - 3 * y_unc_filtered,
+        y_vals_filtered + 3 * y_unc_filtered,
+        step=step_where,
+        alpha=0.3,
+        color=color,
+    )
+    
+    mask_below = y_vals < mask[0]
+    mask_above = y_vals > mask[1]
+    
+    ax_twin.plot(
+        x_vals[mask_below],
+        np.full_like(x_vals[mask_below], mask[0]),
+        marker="v",
+        color=color,
+        markersize=6,
+        clip_on=False,
+        linestyle="None",
+    )
+    ax_twin.plot(
+        x_vals[mask_above],
+        np.full_like(x_vals[mask_above], mask[1]),
+        marker="^",
+        color=color,
+        markersize=6,
+        clip_on=False,
+        linestyle="None",
+    )
+
+

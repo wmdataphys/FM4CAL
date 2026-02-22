@@ -173,3 +173,33 @@ class ConditionedAdapter(nn.Module):
 
     def forward(self, x,):
         return x + self.mlp(x)
+
+
+class LPE_Expansion(nn.Module):
+    def __init__(self, embed_dim, seq_len, weight=None):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.seq_len = seq_len
+        self.pos_embedding = nn.Embedding(seq_len, embed_dim)
+        if weight is not None:
+            print(f"Initializing LPE with provided {weight.shape} weight matrix.")
+            self.pos_embedding.weight[:weight.shape[0]].data.copy_(weight)
+            self.old_seq_len = weight.shape[0]
+        else:
+            print("Initializing LPE with random weights.")
+            self.old_seq_len = 0
+
+    def mask_old_LPE_grads(self,grad):
+        grad_masked = grad.clone()
+        grad_masked[:self.old_seq_len, :] = 0.0
+        return grad_masked
+
+    def forward(self, positions):
+        pos_embeds = self.pos_embedding(positions)
+
+        if self.training and pos_embeds.requires_grad and self.old_seq_len > 0:
+            pos_embeds.register_hook(self.mask_old_LPE_grads)
+
+        return pos_embeds
+
+

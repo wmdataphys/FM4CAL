@@ -57,6 +57,7 @@ notebook/
 .ipython/
 .local/
 .cache/
+FineTuningStudies/
 
 # --- Generated model outputs / artifacts ---
 ECALGPT_generated/

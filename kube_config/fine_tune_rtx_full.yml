@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: electron-ft
+  name: w-electron-randn-init
   namespace: ai4phys
 spec:
   restartPolicy: Never
@@ -31,30 +31,36 @@ spec:
           export OMP_NUM_THREADS=2
           eval "$(conda shell.bash hook)"
           conda activate /sciclone/home/jgiroux/.conda/envs/torch_linux
-          torchrun --nproc-per-node=4 /sciclone/home/jgiroux/FM4CAL/fine_tune.py \
+          torchrun --nproc-per-node=2 /sciclone/home/jgiroux/FM4CAL/fine_tune.py \
             --config /sciclone/home/jgiroux/FM4CAL/config/CA_config_dist_copy.json \
             --default_material_list "G4_W_gamma" "G4_Ta_gamma" "G4_Pb_gamma" \
             --material_to_add "G4_W_e-" \
-            --closest_expert "G4_W_gamma" \
             --base_particle_list "gamma" \
             --particle_type "e-" \
-            --fine_tune_path /sciclone/data10/jgiroux/ECAL_Cole/ECAL_Models/APE_Model_FineTune_G4_Pb_gamma___Feb-08-2026/Epoch10_loss_9.717275.pth \
-            > /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_FineTune_G4_W_e-.txt 2>&1
+            --fine_tune_path /sciclone/data10/jgiroux/ECAL_Cole/ECAL_Models/APE_BaseModel_1800Seq_40Batch_FineTune_G4_Pb_gamma_2100Seq___Feb-19-2026/Epoch10_loss_9.720423.pth \
+            > /sciclone/scr30/jgiroux/FM4CAL/TrainLogs/APE_1800Seq_Base_FineTune_G4_W_e-_2100Seq_RandomInit.txt 2>&1
       resources:
         requests:
-          cpu: "31"
+          cpu: "32"
           memory: "250Gi"
-          nvidia.com/gpu: "4"
+          nvidia.com/gpu: "2"
         limits:
-          cpu: "31"
+          cpu: "32"
           memory: "250Gi"
-          nvidia.com/gpu: "4"
+          nvidia.com/gpu: "2"
       securityContext:
         runAsUser: 255610
         runAsGroup: 50027
+  tolerations:
+    - key: "node"
+      operator: "Equal"
+      value: aiphys
+      effect: "NoSchedule"
   nodeSelector:
-    kubernetes.io/hostname: ts4.sciclone.wm.edu
-    nvidia.com/gpu.product: "Quadro-RTX-6000"
+    kubernetes.io/hostname: aiphys-node1.sciclone.wm.edu
+    nvidia.com/gpu.product: "NVIDIA-L40S"
+    # kubernetes.io/hostname: ts4.sciclone.wm.edu
+    # nvidia.com/gpu.product: "Quadro-RTX-6000"
   volumes:
     - name: nsf
       nfs:
