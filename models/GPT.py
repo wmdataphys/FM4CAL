@@ -412,7 +412,7 @@ class TransformerBlock(nn.Module):
                                 x_norm,
                                 key_padding_mask=padding_mask,
                                 need_weights=need_weights,
-                                attn_mask=mask_,
+                                attn_mask=None,
                                 past_kv=past_kv, rope=rope, LoRA_module=LoRA_module)
 
         delta_proj = LoRA_module.forward_proj(attn_out) if LoRA_module is not None else 0.0
@@ -1180,7 +1180,9 @@ class ECAL_GPT(nn.Module):
                         
                         if self.digitize_energy:
                             e_buffer[:, 0] = 0
-                            e_sos = self.energy_embedding(e_buffer[:, 0:1]) + self.energy_pos_embedding(pos_idx_buffer)
+                            e_sos = self.energy_embedding(e_buffer[:, 0:1])
+                            if not self.use_RoPE:
+                                e_sos = e_sos + self.energy_pos_embedding(pos_idx_buffer)
                         else:
                             e_buffer[:, 0] = 0.0
                             e_sos = self.energy_embedding(e_buffer[:, 0:1].reshape(-1, 1)).view(B, 1, -1) 
@@ -1211,8 +1213,9 @@ class ECAL_GPT(nn.Module):
                         x_t = self.embedding_adapter[particle_type][0](x_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else x_t
                         
                         if self.digitize_energy:
-                            e_t = self.energy_embedding(e_buffer[:, step:step+1]) + \
-                                self.energy_pos_embedding(pos_idx_buffer)
+                            e_t = self.energy_embedding(e_buffer[:, step:step+1])
+                            if not self.use_RoPE:
+                                e_t = e_t + self.energy_pos_embedding(pos_idx_buffer)
                         else:
                             e_t = self.energy_embedding(e_buffer[:, step:step+1].reshape(-1, 1)).view(B, 1, -1)
 

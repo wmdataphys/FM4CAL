@@ -552,7 +552,10 @@ def benchmark(
     """
 
     if max_seq_len is None:
-        max_seq_len = model.pos_embedding.num_embeddings
+        if hasattr(model, 'pos_embedding'):
+            max_seq_len = model.pos_embedding.num_embeddings
+        else:
+            max_seq_len = model.seq_len 
 
     model.eval()
 
@@ -929,7 +932,7 @@ def main(args):
 
     model = ECAL_GPT(
         vocab_size=27003,
-        seq_len=2100,
+        seq_len=args.max_seq_len,
         embed_dim=256,
         attn_heads=[8, 8, 8],
         num_blocks=6,
@@ -942,6 +945,7 @@ def main(args):
         num_experts=3,
         material_list=["G4_W", "G4_Ta", "G4_Pb"],
         device=device,
+        use_RoPE=not args.no_rope,
     ).to(device)
 
     checkpoint = torch.load(args.model_path, map_location=device)
@@ -1075,6 +1079,7 @@ if __name__ == "__main__":
                        help="Benchmark all three modes: no cache, KV cache, CUDA graph")
     parser.add_argument("--instrument", action="store_true")
     parser.add_argument("--instrument_steps", type=int, default=500)
+    parser.add_argument('--no_rope', action='store_true', help="Don't use RUPE scaling in attention (for profiling impact)")
     args = parser.parse_args()
 
     main(args)
