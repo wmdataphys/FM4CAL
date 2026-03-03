@@ -123,8 +123,14 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
         print("Extending sequence length to:", new_seq_len)
         net.extend_sequence_length(new_seq_len)
         print("\n========= Sequence Adapater Check ==========")
-        old_e_weight = net.energy_pos_embedding.weight.data
-        old_p_weight = net.pos_embedding.weight.data
+        if not is_expanded:
+            print("LPE Expansion doen't exist yet, comparing to existing positional embeddings.")
+            old_e_weight = net.energy_pos_embedding.weight.data
+            old_p_weight = net.pos_embedding.weight.data
+        else:
+            print("LPE expansion exists, comparing to expanded positional embeddings.")
+            old_e_weight = net.lpe_expansion_energy.pos_embedding.weight.data
+            old_p_weight = net.lpe_expansion_pos.pos_embedding.weight.data
 
         new_e_weight = net.lpe_expansion_energy.pos_embedding.weight[:old_e_weight.shape[0]].data
         new_p_weight = net.lpe_expansion_pos.pos_embedding.weight[:old_p_weight.shape[0]].data
@@ -160,19 +166,29 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
 
     if not net.enable_vocab_LoRA and net.learnable_vocabs:
         print("\n========= New Vocab Projection Check =========")
-        old_space_w = net.logits_head.weight.data
-        old_space_b = net.logits_head.bias.data
+        
+        if particle_type in net.vocab_LoRA and net.vocab_LoRA[particle_type][0] is not None:
+            # Particle type already exists - compare to existing vocab heads
+            print(f"Particle type '{particle_type}' already exists - comparing to existing vocab heads")
+            old_space_w = net.vocab_LoRA[particle_type][0].weight.data
+            old_space_b = net.vocab_LoRA[particle_type][0].bias.data
+            old_ene_w = net.vocab_LoRA[particle_type][1].weight.data
+            old_ene_b = net.vocab_LoRA[particle_type][1].bias.data
+        else:
+            # New particle type - compare to base model vocab heads
+            print(f"New particle type '{particle_type}' - comparing to base model vocab heads")
+            old_space_w = net.logits_head.weight.data
+            old_space_b = net.logits_head.bias.data
+            old_ene_w = net.energy_head.weight.data
+            old_ene_b = net.energy_head.bias.data
+        
         new_space_w = net.vocab_LoRA[particle_type][0].weight.data
         new_space_b = net.vocab_LoRA[particle_type][0].bias.data
-
-        old_ene_w = net.energy_head.weight.data
-        old_ene_b = net.energy_head.bias.data
         new_ene_w = net.vocab_LoRA[particle_type][1].weight.data
         new_ene_b = net.vocab_LoRA[particle_type][1].bias.data
 
         w_match = torch.allclose(old_space_w, new_space_w, rtol=1e-5)
         b_match = torch.allclose(old_space_b, new_space_b, rtol=1e-5)
-
         ew_match = torch.allclose(old_ene_w, new_ene_w, rtol=1e-5)
         eb_match = torch.allclose(old_ene_b, new_ene_b, rtol=1e-5)
 

@@ -135,7 +135,6 @@ class Generator:
         else:
             self.energy_dtype = np.float32
 
-        # Will remove this crime later - k8s giving permission errors and don't feel like debugging right now
         outfile = os.path.join("/sciclone/scr30/jgiroux/FM4CAL/Generations", self.args.output_file if self.args.output_file is not None else self.config['Inference']['output_file'])
         outfile = outfile.replace('.h5', f'_rank{self.rank}.h5')
         self.w = ShowerWriterCompound(outfile, token_dtype=self.token_dtype,

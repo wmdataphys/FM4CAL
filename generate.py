@@ -151,7 +151,12 @@ def main(config,args):
 
     model.eval()
 
-
+    print("Photon params:")
+    print("Space vocab weight: ", model.logits_head.weight.data.cpu().numpy().mean())
+    print("Space vocab bias: ", model.logits_head.bias.data.cpu().numpy().mean())
+    print("Energy vocab weight: ", model.energy_head.weight.data.cpu().numpy().mean())
+    print("Energy vocab bias: ", model.energy_head.bias.data.cpu().numpy().mean())
+    print("Done.")
     # for name, param in model.named_parameters():
     #     if "lora" in name:
     #         print(f"Parameter {name} has value: {param.data.cpu().numpy()}")
@@ -235,7 +240,7 @@ def main(config,args):
     
     # test_files = [twb,tab,tpb]  # for quick testing
     # test_files = [test_files[0],test_files[1],test_files[-2],test_files[-1]]  
-    # test_files = test_files[:2] + test_files[-2:]  # for quick testing
+    test_files = test_files[:2] + test_files[-2:]  # for quick testing
     # test_files = test_files[:2] # for quick testing
 
     gen_seq_len = args.gen_seq_len if args.gen_seq_len is not None else msl

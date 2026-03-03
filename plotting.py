@@ -1896,31 +1896,38 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
 
     if material == "G4_Pb_gamma":
         energy_sum = 2400
+    elif material == "G4_Pb_e-":
+        energy_sum = 3000
     else:
         energy_sum = 2000
 
     energy = 70
     if "gamma" in material and "Pb" not in material:
         n_hits = 1700
-    elif "e-" in material or "Pb" in material:
+    elif "W_e-" in material or "Pb_gamma" in material:
         n_hits = 2000
+    elif material == "G4_Pb_e-":
+        n_hits = 2700
     else:
         raise ValueError(f"Unknown material/PID combination: {material}")
 
-    energy_bins = np.logspace(np.log10(0.01), np.log10(energy), 50)
+    energy_bins = np.logspace(np.log10(0.01), np.log10(energy), 50)  # Logarithmic bins for energy
     energy_sum_bins = np.arange(0, energy_sum, 75)
-    voxel_bins = np.arange(0, n_hits, 50)
-    dist_e_bins = np.arange(0, 21, 1)
+    voxel_bins = np.arange(0, n_hits, 50)  # The number of hits
+    dist_e_bins = np.arange(0, 21, 1)  # The distance
     if material == "G4_W_gamma":
         bins_cog = np.arange(8, 22, 0.5)
     elif material == "G4_Ta_gamma":
-        bins_cog = np.arange(10, 25, 0.5)
+        bins_cog = np.arange(10,25,0.5)
     elif material == "G4_W_e-":
-        bins_cog = np.arange(5, 17, 0.5)
+        bins_cog = np.arange(5,17,0.5)
     elif material == "G4_Pb_gamma":
         bins_cog = np.arange(11, 30, 0.5)
+    elif material == "G4_Pb_e-":
+        bins_cog = np.arange(8, 20, 0.5)
     else:
         bins_cog = np.arange(0, 31.5, 0.5)
+
     bins_z = np.arange(0, 31.5, 1)
 
     mpl.rcParams["xtick.labelsize"] = 16
@@ -2379,14 +2386,18 @@ def fine_tuning_hists(feature_sets: list, material: str = None, **kwargs):
 
     if material == "G4_Pb_gamma":
         energy_sum = 2400
+    elif material == "G4_Pb_e-":
+        energy_sum = 3000
     else:
         energy_sum = 2000
 
     energy = 70
     if "gamma" in material and "Pb" not in material:
         n_hits = 1700
-    elif "e-" in material or "Pb" in material:
+    elif "W_e-" in material or "Pb_gamma" in material:
         n_hits = 2000
+    elif material == "G4_Pb_e-":
+        n_hits = 2700
     else:
         raise ValueError(f"Unknown material/PID combination: {material}")
 
@@ -2402,6 +2413,8 @@ def fine_tuning_hists(feature_sets: list, material: str = None, **kwargs):
         bins_cog = np.arange(5,17,0.5)
     elif material == "G4_Pb_gamma":
         bins_cog = np.arange(11, 30, 0.5)
+    elif material == "G4_Pb_e-":
+        bins_cog = np.arange(8, 20, 0.5)
     else:
         bins_cog = np.arange(0, 31.5, 0.5)
 

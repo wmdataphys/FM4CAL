@@ -6,6 +6,7 @@ import copy
 
 from models.MoE import MoE, Router, Expert
 from models.LoRA import LoRA ,Embed_LoRA, Vocab_LoRA, ConditionedAdapter, LPE_Expansion
+from models.RoPE import PartialRoPE
 
 import torch
 import torch.nn as nn
@@ -13,7 +14,6 @@ from torch.nn import functional as F
 from torch.nn.functional import scaled_dot_product_attention as sdpa
 import math
 
-from rotary_embedding_torch import RotaryEmbedding
 
 torch.backends.cuda.enable_flash_sdp(True)         # use FlashAttention when possible
 torch.backends.cuda.enable_mem_efficient_sdp(True) # fallback fused kernel
@@ -22,7 +22,8 @@ torch.backends.cuda.enable_math_sdp(False)         # prefer the fast paths
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 # Prefer BF16 if your GPU supports it; else FP16 is fine
-AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+#AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+AMP_DTYPE = torch.float32
 
 class FF(nn.Module):
     def __init__(self, embed_dim, mlp_scale: int = 2,
@@ -100,8 +101,9 @@ class CrossAttention(nn.Module):
                 q_hits, k_hits = q[:, :, 1:, :], k[:, :, 1:, :]
                 
                 # Hits start at offset 1
-                q_hits = rope.rotate_queries_or_keys(q_hits, offset=1)
-                k_hits = rope.rotate_queries_or_keys(k_hits, offset=1)
+                # q_hits = rope.rotate_queries_or_keys(q_hits, offset=1)
+                # k_hits = rope.rotate_queries_or_keys(k_hits, offset=1)
+                q_hits, k_hits = rope(q_hits, k_hits, offset=1)
                 
                 q = torch.cat([q_global, q_hits], dim=2)
                 k = torch.cat([k_global, k_hits], dim=2)
@@ -109,8 +111,9 @@ class CrossAttention(nn.Module):
                 # offset is simply the current length of the KV cache.
                 offset = past_kv['seq_len'] 
                 
-                q = rope.rotate_queries_or_keys(q, offset=offset)
-                k = rope.rotate_queries_or_keys(k, offset=offset)
+                #q = rope.rotate_queries_or_keys(q, offset=offset)
+                #k = rope.rotate_queries_or_keys(k, offset=offset)
+                q, k = rope(q, k, offset=offset)
 
         # Normalize Q and K
         if self.qk_norm:
@@ -301,8 +304,9 @@ class MHSA(nn.Module):
                 q_hits, k_hits = q[:, :, 1:, :], k[:, :, 1:, :]
                 
                 # Hits start at offset 1
-                q_hits = rope.rotate_queries_or_keys(q_hits, offset=1)
-                k_hits = rope.rotate_queries_or_keys(k_hits, offset=1)
+                # q_hits = rope.rotate_queries_or_keys(q_hits, offset=1)
+                # k_hits = rope.rotate_queries_or_keys(k_hits, offset=1)
+                q_hits, k_hits = rope(q_hits, k_hits, offset=1)
                 
                 q = torch.cat([q_global, q_hits], dim=2)
                 k = torch.cat([k_global, k_hits], dim=2)
@@ -310,8 +314,9 @@ class MHSA(nn.Module):
                 # offset is simply the current length of the KV cache.
                 offset = past_kv['seq_len'] 
                 
-                q = rope.rotate_queries_or_keys(q, offset=offset)
-                k = rope.rotate_queries_or_keys(k, offset=offset)
+                #q = rope.rotate_queries_or_keys(q, offset=offset)
+                #k = rope.rotate_queries_or_keys(k, offset=offset)
+                q, k = rope(q, k, offset=offset)
 
         # Normalize Q and K
         if self.qk_norm:
@@ -451,7 +456,7 @@ class ECAL_GPT(nn.Module):
                 use_MoE=False, num_experts: int = 2, material_list: list  = ["G4_W_gamma", "G4_Ta_gamma"],
                 particle_list: list = ["gamma"], base_model_type: str = "gamma",
                 device: str ='cuda',
-                grid_shape=None,
+                grid_shape=(30,30,30),
                 LoRA_alpha: int =2,
                 LoRA_r: int =16,
                 enable_head_LoRA: bool = False, # Q,K,V and c_proj in MHSA/CA 
@@ -460,7 +465,8 @@ class ECAL_GPT(nn.Module):
                 vocab_LoRA_scale: int = 1, # Scale factor for vocab LoRA rank
                 enable_embedding_adapter = False, # Embedding adapter modules for token and energy embeddings
                 use_RoPE: bool = True,
-                is_expanded: bool = False, base_seq_len: int = 1800 # hard base seq len for pre-trained models, only relevant if is_expanded is True
+                is_expanded: bool = False, base_seq_len: int = 1800, # hard base seq len for pre-trained models, only relevant if is_expanded is True
+                rope_fraction: float = 0.5, theta: int = 1000
                 ):
         super().__init__()
         self.base_seq_len = base_seq_len # Store base_seq_len for reference in LPE expansion
@@ -473,6 +479,8 @@ class ECAL_GPT(nn.Module):
         self.use_MoE = use_MoE
         self.base_model_type = base_model_type
         self.is_expanded = is_expanded
+        self.theta = theta
+        self.rope_fraction = rope_fraction
 
         # Fine Tune params
         self.learnable_vocabs = learnable_vocabs
@@ -517,22 +525,23 @@ class ECAL_GPT(nn.Module):
             self.energy_pos_embedding = nn.Embedding(seq_len, embed_dim)
             print(self.rope)
         else:
-            print("Using RoPE. Theta=4000")
-            self.rope = RotaryEmbedding(dim = self.embed_dim // self.attn_heads[0],
-                                        cache_if_possible = True,
-                                        theta = 4000)
+            print(f"Using Partial RoPE. Theta={self.theta}, fraction = {self.rope_fraction}")
+            #self.rope = RotaryEmbedding(dim = self.embed_dim // self.attn_heads[0],
+            #                            cache_if_possible = True,
+            #                            theta = 1000)
+            self.rope = PartialRoPE(embed_dim = self.embed_dim,
+                                    num_heads = self.attn_heads[0], # Same for all blocks
+                                    theta = self.theta,
+                                    rope_fraction = self.rope_fraction)
             print(self.rope)
 
         # Add in 3D positional embeddings if provided
         self.grid_shape = grid_shape
         if grid_shape is not None:
+            print("Using 3D positional embeddings.")
             Nz, Ny, Nx = grid_shape
             self.Nz, self.Ny, self.Nx = Nz, Ny, Nx
             num_cells = Nz * Ny * Nx
-
-            self.x_embedding = nn.Embedding(Nx, embed_dim)
-            self.y_embedding = nn.Embedding(Ny, embed_dim)
-            self.z_embedding = nn.Embedding(Nz, embed_dim)
 
             # Precompute mapping tokens -> (z,y,x)
             # token ids occupy [1, num_cells], 0 is SOS, num_cells+1 is EOS, num_cells+2 is PAD
@@ -555,10 +564,6 @@ class ECAL_GPT(nn.Module):
             self.register_buffer('tok2x', tok2x)
             self.register_buffer('tok2y', tok2y)
             self.register_buffer('tok2z', tok2z)
-        else:
-            self.x_embedding = None
-            self.y_embedding = None
-            self.z_embedding = None
         
         self.__init_layers()
 
@@ -843,24 +848,10 @@ class ECAL_GPT(nn.Module):
             print("Skipping new head initialization.")
             
 
-    def embed_space_tokens(self, idx, pos_idx):
-        tok_emb = self.token_embedding(idx)
-        pos_emb = self.pos_embedding(pos_idx)
-
-        if self.x_embedding is None:
-            # No 3D embeddings
-            return tok_emb + pos_emb
-        
-        # Map tokens -> z,y,x indices via precomputed lookup
-        x_coord = self.tok2x[idx]
-        y_coord = self.tok2y[idx]
-        z_coord = self.tok2z[idx]
-
-        x_emb = self.x_embedding(x_coord)
-        y_emb = self.y_embedding(y_coord)
-        z_emb = self.z_embedding(z_coord)
-
-        return tok_emb + pos_emb + x_emb + y_emb + z_emb
+    def embed_space_tokens(self, idx):
+        z_value = self.tok2z[idx].float() / self.Nz  
+        # z_value = z_value * self.embed_dim ** -0.5  # Scale by embedding dimension
+        return z_value.unsqueeze(-1).expand(-1, -1, self.embed_dim)  # Broadcast to [B, T, E]
 
     def forward(self, x, e, initial_energy, material_index,padding_mask=None,particle_type="gamma"):
         seq_len = x.shape[1]
@@ -876,7 +867,7 @@ class ECAL_GPT(nn.Module):
             if self.lpe_expansion_energy is not None: # Continually expanded
                 e_embed = e_embed + self.lpe_expansion_energy(pos)
             else: # Base
-                e_embed = e_embed + self.energy_pos_embedding(pos) 
+                e_embed = e_embed + self.energy_pos_embedding(pos)
 
         e_embed = self.embedding_adapter[particle_type][1](e_embed) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_embed
 
@@ -894,6 +885,9 @@ class ECAL_GPT(nn.Module):
         initial_energy_embed = self.init_e_adapter[particle_type](initial_energy_embed) if (hasattr(self, 'init_e_adapter') and particle_type in self.init_e_adapter) else initial_energy_embed
 
         # Apply adaptations to embeddings if applicable
+        if self.grid_shape is not None:
+            xyz_embed = self.embed_space_tokens(x)
+
         if not self.use_RoPE:
             if self.lpe_expansion_pos is not None: # Continually expanded
                 x = self.token_embedding(x) + self.lpe_expansion_pos(pos)
@@ -901,6 +895,9 @@ class ECAL_GPT(nn.Module):
                 x = self.token_embedding(x) + self.pos_embedding(pos)
         else:
             x = self.token_embedding(x)
+
+        if self.grid_shape is not None:
+            x = x + xyz_embed
         
         x = self.embedding_adapter[particle_type][0](x) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else x
 
@@ -967,7 +964,7 @@ class ECAL_GPT(nn.Module):
             return sample_token, min_p_logits
         return sample_token
 
-    def __nucleus(self, logits, p=0.9):
+    def __nucleus(self, logits, p=0.95):
         sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
         probs = torch.softmax(sorted_logits, dim=-1)
         cumsum_probs = torch.cumsum(probs, dim=-1)
@@ -987,6 +984,9 @@ class ECAL_GPT(nn.Module):
     def __linear_dynamic_temp(self, step, max_length, max_temp=1.0, min_temp=0.95):
         return max(max_temp - step / max_length, min_temp)
 
+    def __decreasing_linear_temp(self, step, max_length, max_temp=1.05, min_temp=0.95):
+        return max(min_temp, max_temp - (max_temp - min_temp) * (step / max_length))
+
     def __exp_dynamic_temp(self, step, max_length, max_temp=1.05, min_temp=0.95):
         alpha = (max_temp - min_temp)
         decay_rate = -math.log(1e-2) / max_length  
@@ -995,6 +995,23 @@ class ECAL_GPT(nn.Module):
 
     def __increasing_linear_temp(self, step, max_length, max_temp=1.2, min_temp=1.0):
         return min(max_temp, min_temp + (max_temp - min_temp) * (step / max_length))
+
+    def __increasing_sigmoid_temp(self, step, max_length, max_temp=1.2, min_temp=1.0, k=10.0, center=0.6):
+        """
+        k: Steepness of the curve. Higher k = faster transition.
+        center: The point (0.0 to 1.0) where the temperature is exactly (min+max)/2.
+        """
+        # Normalize the current step to [0, 1]
+        progress = step / max_length
+        
+        # Sigmoid logic: 1 / (1 + exp(-k * (x - x0)))
+        # This replaces the linear (step / max_length) term
+        sigmoid_ratio = 1 / (1 + math.exp(-k * (progress - center)))
+        
+        # Map the [0, 1] sigmoid output to the [min_temp, max_temp] range
+        temp = min_temp + (max_temp - min_temp) * sigmoid_ratio
+        
+        return min(max_temp, max(min_temp, temp))
 
     def __increasing_exp_temp(self, step, max_length, max_temp=1.2, min_temp=1.0):
         alpha = (max_temp - min_temp)
@@ -1047,12 +1064,12 @@ class ECAL_GPT(nn.Module):
 
                 # Adjust temperature if dynamic
                 if dynamic_temp:
-                    # temperature = self.__linear_dynamic_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
+                    # temperature = self.__decreasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     # temperature = self.__increasing_exp_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     # temperature = self.__exp_dynamic_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
-                    #print(f"Step {step}: temperature={temperature:.4f}")
-
+                    # temperature = self.__increasing_sigmoid_temp(step, max_seq_len, min_temp=0.94,max_temp=1.06,k=12.0,center=0.55)
+                    # print("Timestep: {}, Temperature: {:.4f}".format(step, temperature))
                 if use_kv_cache:
                     if step == 0:
                         # FIRST STEP: [B, 2, E]
@@ -1066,6 +1083,10 @@ class ECAL_GPT(nn.Module):
                                 sos_embed = sos_embed + self.lpe_expansion_pos(pos_idx)
                             else: # Base
                                 sos_embed = sos_embed + self.pos_embedding(pos_idx)
+
+                        if self.grid_shape is not None:
+                            xyz_embed = self.embed_space_tokens(idx_buffer[:, 0:1]) 
+                            sos_embed = sos_embed + xyz_embed
 
                         sos_embed = self.embedding_adapter[particle_type][0](sos_embed) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else sos_embed
                         
@@ -1099,6 +1120,10 @@ class ECAL_GPT(nn.Module):
                                 x_t = x_t + self.lpe_expansion_pos(pos_idx)
                             else: # Base
                                 x_t = x_t + self.pos_embedding(pos_idx)
+
+                        if self.grid_shape is not None:
+                            xyz_embed = self.embed_space_tokens(idx_buffer[:, step:step+1])
+                            x_t = x_t + xyz_embed
 
                         # Adapter on embeddings if avail
                         x_t = self.embedding_adapter[particle_type][0](x_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else x_t
