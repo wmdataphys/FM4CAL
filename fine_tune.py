@@ -117,32 +117,32 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
     experts_per_class = net.num_experts // len(default_material_list)
     net.extend_model(materials_list + [material_to_add], closest_expert=closest_expert, particle_type=particle_type, weights=weights, pissa_init=enable_pissa)
 
-    if new_seq_len is not None:
-        assert new_seq_len > msl, "New sequence length must be greater than the current maximum sequence length."
-        
-        print("Extending sequence length to:", new_seq_len)
-        net.extend_sequence_length(new_seq_len)
-        print("\n========= Sequence Adapater Check ==========")
-        if not is_expanded:
-            print("LPE Expansion doen't exist yet, comparing to existing positional embeddings.")
-            old_e_weight = net.energy_pos_embedding.weight.data
-            old_p_weight = net.pos_embedding.weight.data
+    if not use_RoPE:
+        if new_seq_len is not None:
+            assert new_seq_len > msl, "New sequence length must be greater than the current maximum sequence length."
+            
+            print("Extending sequence length to:", new_seq_len)
+            net.extend_sequence_length(new_seq_len)
+            print("\n========= Sequence Adapater Check ==========")
+            if not is_expanded:
+                print("LPE Expansion doen't exist yet, comparing to existing positional embeddings.")
+                old_e_weight = net.energy_pos_embedding.weight.data
+                old_p_weight = net.pos_embedding.weight.data
+            else:
+                print("LPE expansion exists, comparing to expanded positional embeddings.")
+                old_e_weight = net.lpe_expansion_energy.pos_embedding.weight.data
+                old_p_weight = net.lpe_expansion_pos.pos_embedding.weight.data
+
+            new_e_weight = net.lpe_expansion_energy.pos_embedding.weight[:old_e_weight.shape[0]].data
+            new_p_weight = net.lpe_expansion_pos.pos_embedding.weight[:old_p_weight.shape[0]].data
+
+            are_same_e = torch.allclose(old_e_weight, new_e_weight, rtol=1e-5)
+            are_same_p = torch.allclose(old_p_weight, new_p_weight, rtol=1e-5)
+            print(f"Energy Positional Embedding: New vs Old: {'MATCH' if are_same_e else 'DO NOT MATCH'}")
+            print(f"Positional Embedding: New vs Old: {'MATCH' if are_same_p else 'DO NOT MATCH'}")
+            print("=============================================")
         else:
-            print("LPE expansion exists, comparing to expanded positional embeddings.")
-            old_e_weight = net.lpe_expansion_energy.pos_embedding.weight.data
-            old_p_weight = net.lpe_expansion_pos.pos_embedding.weight.data
-
-        new_e_weight = net.lpe_expansion_energy.pos_embedding.weight[:old_e_weight.shape[0]].data
-        new_p_weight = net.lpe_expansion_pos.pos_embedding.weight[:old_p_weight.shape[0]].data
-
-        are_same_e = torch.allclose(old_e_weight, new_e_weight, rtol=1e-5)
-        are_same_p = torch.allclose(old_p_weight, new_p_weight, rtol=1e-5)
-        print(f"Energy Positional Embedding: New vs Old: {'MATCH' if are_same_e else 'DO NOT MATCH'}")
-        print(f"Positional Embedding: New vs Old: {'MATCH' if are_same_p else 'DO NOT MATCH'}")
-        print("=============================================")
-    else:
-        print("Using existing sequence length:", msl)
-
+            print("Using existing sequence length:", msl)
 
 
     print("\n========= New Expert Weight Check =========")
@@ -216,7 +216,12 @@ class Trainer:
 
         self.use_amp = config['use_amp']
         if self.use_amp:
+            if self.rank == 0:
+                print("Using Automatic Mixed Precision (AMP)")
             self.scaler = GradScaler()
+        else:
+            if self.rank == 0:
+                print("Not using Automatic Mixed Precision (AMP)")
 
         self.use_MoE = bool(config['model']['use_MoE'])
         self.digitize_energy = bool(config['digitize_energy'])

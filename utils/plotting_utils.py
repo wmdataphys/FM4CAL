@@ -943,11 +943,11 @@ def read_and_filter_energies(comp_path,min_threshold=1e-15,max_threshold=35.0):
     z = ak_array['z']
 
     # Not used anymore, should rename function at some point
-    # mask = (energies >= min_threshold) & (energies <= max_threshold)
-    # filtered_energies = energies[mask]
-    filtered_x = x#[mask]
-    filtered_y = y#[mask]
-    filtered_z = z#[mask]
+    mask = (energies >= min_threshold) & (energies <= max_threshold)
+    filtered_energies = energies[mask]
+    filtered_x = x[mask]
+    filtered_y = y[mask]
+    filtered_z = z[mask]
 
     return ak.Array({"energy": filtered_energies,"x": filtered_x, "y": filtered_y, "z": filtered_z})
 

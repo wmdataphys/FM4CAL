@@ -104,7 +104,7 @@
         }
   },
   "Inference": {
-    "model_path": "Trained_Models/Partial_RoPE_Base_Z_ABS_SpatialOnly_Theta1000_Frac0.5_32Precision___Mar-03-2026/Epoch00_loss_0.000000.pth",
+    "model_path": "Trained_Models/Partial_RoPE_Base_Z_ABS_SpatialOnly_Theta1000_Frac0.5_32Precision___Mar-03-2026/Epoch05_loss_0.000000.pth",
     "model_path_": "Trained_Models/Partial_RoPE_Base_XYZ_Embed_Theta1000_Frac0.5___Mar-02-2026/Epoch04_loss_0.000000.pth",
     "partial_above": true,
     "model_path_": "Trained_Models/RoPE_Base_XYZ_Embed_Theta1000___Mar-02-2026/Epoch04_loss_0.000000.pth",
@@ -157,7 +157,7 @@
     "model_path_": "Trained_Models/FineTuning_W_Ta_with_Pb_V1___Dec-26-2025/Epoch07_loss_9.960306.pth",
     "model_path_256": "Trained_Models/25MeVTokens_256Embed_NoMatEmbedding_EnergyOrder___Dec-18-2025/Epoch16_loss_9.931702.pth",
     "model_path_384": "Trained_Models/25MeVTokens_384Embed_NoMatEmbedding_EnergyOrder___Dec-19-2025/Epoch07_loss_9.914091.pth",
-    "output_file": "RoPE_Base_Z_Abs_SpatialOnly_50Partial_Theta1000_32Precision_Epoch00_Static.h5",
+    "output_file": "RoPE_Base_Z_Abs_SpatialOnly_50Partial_Theta1000_32Precision_Epoch05_Dynamic0975_1025.h5",
     "output_file_": "80GeV_StaticTemp.h5",
     "output_file_": "RoPE_BaseModel_Theta4k_NoinitERotation_Epoch03.h5",
     "output_file_": "RoPE_Electron_FineTune_Full_LearnableVocab_LowRank_Epoch06.h5",

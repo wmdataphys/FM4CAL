@@ -22,6 +22,7 @@ torch.backends.cuda.enable_math_sdp(False)         # prefer the fast paths
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 # Prefer BF16 if your GPU supports it; else FP16 is fine
+# 16-bit presicion causes RoPE drift 
 #AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 AMP_DTYPE = torch.float32
 
@@ -1065,7 +1066,7 @@ class ECAL_GPT(nn.Module):
                 # Adjust temperature if dynamic
                 if dynamic_temp:
                     # temperature = self.__decreasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
-                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
+                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.025, min_temp=0.975)
                     # temperature = self.__increasing_exp_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     # temperature = self.__exp_dynamic_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     # temperature = self.__increasing_sigmoid_temp(step, max_seq_len, min_temp=0.94,max_temp=1.06,k=12.0,center=0.55)

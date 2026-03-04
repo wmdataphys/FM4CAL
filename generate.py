@@ -240,7 +240,7 @@ def main(config,args):
     
     # test_files = [twb,tab,tpb]  # for quick testing
     # test_files = [test_files[0],test_files[1],test_files[-2],test_files[-1]]  
-    test_files = test_files[:2] + test_files[-2:]  # for quick testing
+    # test_files = test_files[:4] + test_files[-4:]  # for quick testing
     # test_files = test_files[:2] # for quick testing
 
     gen_seq_len = args.gen_seq_len if args.gen_seq_len is not None else msl
