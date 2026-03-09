@@ -683,7 +683,7 @@ class ECAL_GPT(nn.Module):
             )
         return self._compiled_decode
 
-    def _allocate_kv_cache(self, batch_size, max_len, device, dtype=torch.float16):
+    def _allocate_kv_cache(self, batch_size, max_len, device, dtype=AMP_DTYPE):
         """
         Pre-allocate KV cache buffers to avoid concatenation overhead.
         
@@ -1467,7 +1467,10 @@ class ECAL_GPT(nn.Module):
         init_e_embed = self.initial_energy_embedding(initial_energy).unsqueeze(1).to(dtype)
         
         is_done = torch.zeros(B, dtype=torch.bool, device=device)
-        
+
+        has_embed_adapter = hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter
+        has_vocab_lora = hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA
+
         # ============ FIRST STEP (no graph - has different shape) ============
         with torch.amp.autocast('cuda', dtype=dtype):
             buffers['idx_buffer'][:, 0] = self.SOS_token
@@ -1478,12 +1481,12 @@ class ECAL_GPT(nn.Module):
             # Compute embeddings for first step
             sos_embed = (self.token_embedding(buffers['idx_buffer'][:, 0:1]) + 
                         self.pos_embedding(buffers['pos_idx']))
-            if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
+            if has_embed_adapter:
                 sos_embed = self.embedding_adapter[particle_type][0](sos_embed)
             
             e_sos = (self.energy_embedding(buffers['e_buffer'][:, 0:1]) + 
                     self.energy_pos_embedding(buffers['pos_idx']))
-            if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
+            if has_embed_adapter:
                 e_sos = self.embedding_adapter[particle_type][1](e_sos)
             
             # First step: [init_e, sos] -> shape [B, 2, E]
@@ -1535,14 +1538,14 @@ class ECAL_GPT(nn.Module):
                     buffers['pos_embed'].copy_(self.pos_embedding(buffers['pos_idx']).to(dtype))
                     buffers['x_t'].copy_(buffers['tok_embed'] + buffers['pos_embed'])
                     
-                    if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
+                    if has_embed_adapter:
                         buffers['x_t'].copy_(self.embedding_adapter[particle_type][0](buffers['x_t']))
                     
                     buffers['e_embed'].copy_(self.energy_embedding(buffers['e_buffer'][:, step:step+1]).to(dtype))
                     buffers['e_pos_embed'].copy_(self.energy_pos_embedding(buffers['pos_idx']).to(dtype))
                     buffers['e_t'].copy_(buffers['e_embed'] + buffers['e_pos_embed'])
                     
-                    if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
+                    if has_embed_adapter:
                         buffers['e_t'].copy_(self.embedding_adapter[particle_type][1](buffers['e_t']))
                     
                     self.forward_decode_step_static(
@@ -1588,7 +1591,7 @@ class ECAL_GPT(nn.Module):
                 buffers['pos_embed'].copy_(self.pos_embedding(buffers['pos_idx']).to(dtype))
                 buffers['x_t'].copy_(buffers['tok_embed'] + buffers['pos_embed'])
                 
-                if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
+                if has_embed_adapter:
                     buffers['x_t'].copy_(self.embedding_adapter[particle_type][0](buffers['x_t']))
                 
                 buffers['e_embed'].copy_(self.energy_embedding(buffers['e_buffer'][:, step:step+1]).to(dtype))
