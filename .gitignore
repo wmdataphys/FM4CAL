@@ -38,6 +38,7 @@ dist/
 # Ignore data folders
 data/
 
+make_split.py
 # ignore config
 # config/
 kube_config/
