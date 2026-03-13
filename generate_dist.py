@@ -49,6 +49,7 @@ def create_model(config,expanded_seq_len=None):
     loRA_alpha = config['model']['LoRA_alpha']
     enable_head_LoRA = config['model']['enable_head_LoRA']
     enable_vocab_LoRA = config['model']['enable_vocab_LoRA']
+    learnable_vocabs = config['model']['learnable_vocabs']
     enable_embedding_adapter = config['model']['enable_embedding_adapter']
     vocab_LoRA_scale = config['model']['vocab_LoRA_scale']
     use_RoPE = config['model']['use_RoPE']
@@ -80,6 +81,7 @@ def create_model(config,expanded_seq_len=None):
                 enable_vocab_LoRA=enable_vocab_LoRA,
                 enable_embedding_adapter=enable_embedding_adapter,
                 vocab_LoRA_scale=vocab_LoRA_scale,
+                learnable_vocabs=learnable_vocabs,
                 use_RoPE=use_RoPE, is_expanded=is_expanded
                 )
 
@@ -413,6 +415,9 @@ def main(config,args):
     # Replace in config for downstream use (e.g., in Generator class)
     config['material_list'] = material_list
     config['particle_list'] = particle_list
+
+    print("Config material list: ", config['material_list'])
+    print("Config particle list: ", config['particle_list'])
 
     if args.materials_to_generate is not None:
         materials_to_generate = args.materials_to_generate

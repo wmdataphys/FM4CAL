@@ -1477,415 +1477,6 @@ def add_divergence_metrics(ax, data1, data2, bins, feature, fontsize, **kwargs):
     )
 
 
-# def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = None, material: str = None, **kwargs):
-#     """Plots the features of multiple constituent or shower sets.
-
-#     Args:
-#         feature_sets: A list of dictionaries, each containing awkward arrays for "x", "y", "z", and "energy" features.
-#         labels: (Optional) A list of labels for the feature sets (defaults to 'Set 1', 'Set 2', etc.).
-#         colors: (Optional) A list of colors for the feature sets (defaults to a matplotlib colormap).
-#         kwargs: Additional keyword arguments to pass to the plotting functions.
-#     """
-
-#     num_sets = len(feature_sets)
-
-#     if labels is None:
-#         labels = [f"Set {i + 1}" for i in range(num_sets)]
-#     if colors is None:
-#         colors = plt.cm.get_cmap("tab10").colors  # Use matplotlib's colormap
-
-#     # Preprocessing & feature extraction
-#     features_list = []
-#     for features in feature_sets:
-#         # Filter voxels with energy > 0.1
-#         mask = features["energy"] > 0.1
-#         filtered_features = {
-#             "x": features["x"][mask],
-#             "y": features["y"][mask],
-#             "z": features["z"][mask],
-#             "energy": features["energy"][mask],
-#         }
-
-#         features_list.append(
-#             {
-#                 "voxel": ak.to_numpy(ak.num(filtered_features["x"])),
-#                 "energy": ak.flatten(features["energy"]).to_numpy(),  # Keep all energies here
-#                 "shower_energy": ak.to_numpy(ak.sum(filtered_features["energy"], axis=1)),
-#                 # "max_z": find_max_energy_z(filtered_features["energy"], filtered_features["z"]),
-#                 "x_zero": ak.to_numpy(
-#                     get_COG_ak(filtered_features["x"], filtered_features["energy"])
-#                 ),
-#                 "y_zero": ak.to_numpy(
-#                     get_COG_ak(filtered_features["y"], filtered_features["energy"])
-#                 ),
-#                 "z_zero": ak.to_numpy(
-#                     get_COG_ak(filtered_features["z"], filtered_features["energy"])
-#                 ),
-#                 "x": ak.flatten(filtered_features["x"]).to_numpy(),
-#                 "y": ak.flatten(filtered_features["y"]).to_numpy(),
-#                 "z": ak.flatten(filtered_features["z"]).to_numpy(),
-#                 "distance": np.mean(
-#                     sum_energy_per_radial_distance(
-#                         filtered_features["x"], filtered_features["y"], filtered_features["energy"]
-#                     ),
-#                     axis=0,
-#                 ),
-#                 "distance_uncertainty":
-#                     sum_energy_per_radial_distance_unc(
-#                         filtered_features["x"], filtered_features["y"], filtered_features["energy"]),
-#                 "energy_filtered": ak.flatten(filtered_features["energy"]).to_numpy(),
-#                 "energy_per_layer": np.mean(
-#                     sum_energy_per_layer(filtered_features["z"], filtered_features["energy"]),
-#                     axis=0,
-#                 ), 
-#                 "energy_per_layer_uncertainty":
-#                     sum_energy_per_layer_unc(filtered_features["z"], filtered_features["energy"]),
-#                 "pixel": np.arange(0, 21) + 0.5,
-#                 "hits": np.arange(0, 29) + 0.5,
-#             }
-#         )
-
-#     # Plotting (two figures)
-#     mpl.rcParams["xtick.labelsize"] = 15
-#     mpl.rcParams["ytick.labelsize"] = 15
-#     # mpl.rcParams['font.size'] = 28
-#     mpl.rcParams["font.size"] = 10
-#     mpl.rcParams["legend.frameon"] = False
-#     mpl.rcParams["text.usetex"] = False
-#     mpl.rcParams["font.family"] = "sans-serif"
-
-#     fig = plt.figure(figsize=(18, 12), facecolor="white")
-
-#     """Plots the distributions of energy, energy sum, number of hits, and z start layer."""
-#     gs = fig.add_gridspec(
-#         5, 3, wspace=0.3, hspace=0.1, height_ratios=[3, 0.8, 0.9, 3, 0.8]
-#     )  # 3 rows for the different distributions
-#     # print("Plotting distributions:max(features_list[z])",  max(features_list["z"]))
-
-#     # Binning setup (adjust ranges and bins as needed for your data)
-#     fontsize_labels = 22
-
-#     if material == "G4_Pb_gamma":
-#         energy_sum = 2400
-#     else:
-#         energy_sum = 2000
-
-#     energy = 70
-#     if "gamma" in material and "Pb" not in material:
-#         n_hits = 1700
-#     elif "e-" in material or "Pb" in material:
-#         n_hits = 2000
-#     else:
-#         raise ValueError(f"Unknown material/PID combination: {material}")
-
-#     energy_bins = np.logspace(np.log10(0.01), np.log10(energy), 50)  # Logarithmic bins for energy
-#     energy_sum_bins = np.arange(0, energy_sum, 75)
-#     voxel_bins = np.arange(0, n_hits, 50)  # The number of hits
-#     dist_e_bins = np.arange(0, 21, 1)  # The distance
-#     if material == "G4_W_gamma":
-#         bins_cog = np.arange(8, 22, 0.5)
-#     elif material == "G4_Ta_gamma":
-#         bins_cog = np.arange(10,25,0.5)
-#     elif material == "G4_W_e-":
-#         bins_cog = np.arange(5,17,0.5)
-#     elif material == "G4_Pb_gamma":
-#         bins_cog = np.arange(11, 30, 0.5)
-#     else:
-#         bins_cog = np.arange(0, 31.5, 0.5)
-#     # bins_cog = np.arange(4, 25, 1.0)  # original - np.arange(8, 22, 0.5)
-#     #bins_cog = np.arange(5, 22, 0.5)
-#     bins_z = np.arange(0, 31.5, 1)
-
-#     # Energy Distribution
-#     ax0 = fig.add_subplot(gs[0, 0])  # vis cell energy x/y log
-#     ax1 = fig.add_subplot(gs[0, 1])  # energy sum
-#     ax2 = fig.add_subplot(gs[0, 2])  # number of hits
-#     ax3 = fig.add_subplot(gs[3, 0])  # center of gravity Z
-#     ax4 = fig.add_subplot(gs[3, 1])  # spatial distribution Z
-#     ax5 = fig.add_subplot(gs[3, 2])  # energy over distance
-
-#     # looping through all input data to be plottet on the different distributions
-#     for features, label, color in zip(features_list, labels, colors):
-#         histtype = "stepfilled" if features is features_list[0] else "step"
-#         edgecolor = "gray" if histtype == "stepfilled" else color
-#         linestyle = (
-#             "--"
-#             if len(features_list) > 2
-#             and (
-#                 features is features_list[2]
-#                 or len(features_list) > 3
-#                 and (features is features_list[3])
-#             )
-#             else "-"
-#         )
-#         alpha = 0.95
-#         ax0.hist(
-#             features["energy"],
-#             bins=energy_bins,
-#             linestyle=linestyle,
-#             histtype=histtype,
-#             edgecolor=edgecolor,
-#             lw=2,
-#             alpha=alpha,
-#             label=label,
-#             color=color,
-#         )
-#         ax1.hist(
-#             features["shower_energy"],
-#             bins=energy_sum_bins,
-#             histtype=histtype,
-#             edgecolor=edgecolor,
-#             linestyle=linestyle,
-#             lw=2,
-#             alpha=alpha,
-#             label=label,
-#             density=True,
-#             color=color,
-#         )
-#         ax2.hist(
-#             features["voxel"],
-#             bins=voxel_bins,
-#             histtype=histtype,
-#             edgecolor=edgecolor,
-#             linestyle=linestyle,
-#             lw=2,
-#             alpha=alpha,
-#             label=label,
-#             density=True,
-#             color=color,
-#         )
-#         ax3.hist(
-#             features["z_zero"],
-#             bins=bins_cog,
-#             histtype=histtype,
-#             lw=2,
-#             alpha=alpha,
-#             linestyle=linestyle,
-#             label=label,
-#             edgecolor=edgecolor,
-#             density=True,
-#             color=color,
-#         )
-#         ax4.hist(
-#             features["hits"],
-#             bins=bins_z,
-#             histtype=histtype,
-#             lw=2,
-#             alpha=alpha,
-#             label=label,
-#             color=color,
-#             linestyle=linestyle,
-#             weights=features["energy_per_layer"],
-#         )
-#         ax5.hist(
-#             features["pixel"],
-#             bins=dist_e_bins,
-#             weights=features["distance"],
-#             histtype=histtype,
-#             edgecolor=edgecolor,
-#             linestyle=linestyle,
-#             lw=2,
-#             alpha=alpha,
-#             label=label,
-#             color=color,
-#         )
-#     # ax0.set_xlabel("Energy (MeV)")
-#     ax0.set_ylabel("a.u.", fontsize=fontsize_labels)
-#     ax0.set_xscale("log")
-#     ax0.set_yscale("log")
-#     ax0.set_xlim(left=0.01)
-#     ax0.axvspan(0.01, 0.1, ymin=0, ymax=0.73, facecolor="lightgray", alpha=0.2, hatch="/")
-#     ax0.tick_params(axis="x", labelbottom=False)
-#     ymin, ymax = ax0.get_ylim()
-#     new_ymax = ymax + 1620 * ymax
-#     ax0.set_ylim(ymin, new_ymax)
-#     # Create twin axis for ratio plot
-
-#     mask = [0.7, 1.3]
-#     ax0_twin = fig.add_subplot(gs[1, 0], sharex=ax0)
-#     ax0_twin.set_xlim(left=0.01)
-#     plot_ratios(ax0_twin, features_list, energy_bins, "energy", labels, colors, mask=mask)
-#     # Add horizontal line at y=1
-#     ax0_twin.axhline(y=1, color="gray", linestyle="--")
-#     ax0_twin.axvspan(0.01, 0.1, facecolor="lightgray", alpha=0.5, hatch="/")
-#     # Set y-axis limits
-#     ax0_twin.set_ylim(mask)
-#     ax0_twin.set_ylabel("ratio", color="black", fontsize=fontsize_labels)
-#     ax0_twin.set_xlabel("visible cell energy [MeV]", fontsize=fontsize_labels)
-#     ax0_twin.tick_params(axis="y", labelcolor="black")
-
-#     # Energy Sum Distribution
-#     ax1.set_ylabel("normalized", fontsize=fontsize_labels)
-#     ax1.yaxis.set_major_formatter(ticker.ScalarFormatter(useMathText=True))
-#     ax1.ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True)
-#     ax1.tick_params(axis="x", labelbottom=False)
-#     ymin, ymax = ax1.get_ylim()
-#     new_ymax = ymax + 0.45 * ymax
-#     ax1.set_ylim(ymin, new_ymax)
-#     # Create twin axis for ratio plot
-#     ax1_twin = fig.add_subplot(gs[1, 1], sharex=ax1)
-#     plot_ratios(
-#         ax1_twin, features_list, energy_sum_bins, "shower_energy", labels, colors, mask=mask
-#     )
-#     ax1_twin.axhline(y=1, color="gray", linestyle="--")
-#     # Set y-axis limits
-#     ax1_twin.set_ylim(mask)
-#     ax1_twin.set_ylabel("ratio", color="black", fontsize=fontsize_labels)
-#     ax1_twin.set_xlabel("energy sum [MeV]", fontsize=fontsize_labels)
-#     ax1_twin.tick_params(axis="y", labelcolor="black")
-
-#     # Number of Hits (Voxel) Distribution
-#     mask = [0.6, 1.4]
-#     ax2.set_ylabel("normalized", fontsize=fontsize_labels)
-#     ax2.tick_params(axis="x", labelbottom=False)
-#     ax2.yaxis.set_major_formatter(ticker.ScalarFormatter(useMathText=True))
-#     ax2.ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True)
-#     ymin, ymax = ax2.get_ylim()
-#     new_ymax = ymax + 0.44 * ymax
-#     ax2.set_ylim(ymin, new_ymax)
-
-#     # Create twin axis for ratio plot
-#     ax2_twin = fig.add_subplot(gs[1, 2], sharex=ax2)
-#     plot_ratios(ax2_twin, features_list, voxel_bins, "voxel", labels, colors, mask)
-
-#     ax2_twin.axhline(y=1, color="gray", linestyle="--")
-
-#     # Set y-axis limits
-#     ax2_twin.set_ylim(mask)
-#     ax2_twin.set_ylabel("ratio", color="black", fontsize=fontsize_labels)
-#     ax2_twin.set_xlabel("number of hits", fontsize=fontsize_labels)
-#     ax2_twin.tick_params(axis="y", labelcolor="black")
-
-#     # Center of Gravity Z Distribution
-#     ax3.set_ylabel("normalized", fontsize=fontsize_labels)
-#     ax3.tick_params(axis="x", labelbottom=False)
-#     ax3.yaxis.set_major_formatter(ticker.ScalarFormatter(useMathText=True))
-#     ax3.ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useMathText=True)
-#     #ax3.set_yscale("log")
-#     ymin, ymax = ax3.get_ylim()
-#     new_ymax = ymax + 0.48 * ymax
-#     ax3.set_ylim(ymin, new_ymax)
-
-#     # Create twin axis for ratio plot
-#     ax3_twin = fig.add_subplot(gs[4, 0], sharex=ax3)
-#     mask = (0.4, 1.6)
-#     plot_ratios(ax3_twin, features_list, bins_cog, "z_zero", labels, colors, mask=mask)
-
-#     ax3_twin.axhline(y=1, color="gray", linestyle="--")
-
-#     # Set y-axis limits
-
-#     ax3_twin.set_ylim(mask)
-#     ax3_twin.set_ylabel("ratio", color="black", fontsize=fontsize_labels)
-#     ax3_twin.set_xlabel("center of gravity Z [layer]", fontsize=fontsize_labels)
-#     ax3_twin.tick_params(axis="y", labelcolor="black")
-
-#     # Z Distribution
-#     ax4.set_ylabel("energy [MeV]", fontsize=fontsize_labels)
-#     ax4.tick_params(axis="x", labelbottom=False)
-#     ax4.set_yscale("log")
-#     ax4.set_xlim(0, 30)
-#     ymin, ymax = ax4.get_ylim()
-#     new_ymax = ymax + 40 * ymax
-#     ax4.set_ylim(ymin, new_ymax)
-
-#     # Create twin axis for ratio plot
-#     ax4_twin = fig.add_subplot(gs[4, 1], sharex=ax4)
-#     mask = [0.7, 1.3]
-#     # plot_ratios(
-#     #     ax4_twin, features_list, bins_z, "hits", labels, colors, mask, weights="energy_per_layer"
-#     # )
-
-#     plot_ratios(
-#         ax4_twin, 
-#         features_list, 
-#         bins_z, 
-#         "hits",  # Not actually used when uncertainties is provided!
-#         labels, 
-#         colors, 
-#         mask, 
-#         weights="energy_per_layer",
-#         uncertainties="energy_per_layer_uncertainty"  #
-#     )
-
-#     ax4_twin.axhline(y=1, color="gray", linestyle="--")
-
-#     # Set y-axis limits
-
-#     ax4_twin.set_ylim(mask)
-#     ax4_twin.set_xlim(0, 30)
-#     ax4_twin.set_ylabel("ratio", color="black", fontsize=fontsize_labels)
-#     ax4_twin.set_xlabel("layer", fontsize=fontsize_labels)
-#     ax4_twin.tick_params(axis="y", labelcolor="black")
-
-#     # Energy Distribution per Layer
-#     ax5.set_ylabel("energy [MeV]", fontsize=fontsize_labels)
-#     ax5.set_yscale("log")
-#     ax5.set_xlim(0, 21)
-#     ax5.tick_params(axis="x", labelbottom=False, labelsize=fontsize_labels)
-#     ymin, ymax = ax5.get_ylim()
-#     new_ymax = ymax + 40 * ymax
-#     ax5.set_ylim(ymin, new_ymax)
-
-#     # Create twin axis for ratio plot
-#     ax5_twin = fig.add_subplot(gs[4, 2], sharex=ax5)
-#     mask = [0.7, 1.3]
-#     # plot_ratios(
-#     #     ax5_twin, features_list, dist_e_bins, "pixel", labels, colors, mask, weights="distance"
-#     # )
-
-#     plot_ratios(
-#         ax5_twin, 
-#         features_list, 
-#         dist_e_bins, 
-#         "pixel",  
-#         labels, 
-#         colors, 
-#         mask, 
-#         weights="distance",
-#         uncertainties="distance_uncertainty"  
-#     )
-
-#     ax5_twin.axhline(y=1, color="gray", linestyle="--")
-
-#     # Set y-axis limits
-#     ax5_twin.set_ylim(mask)
-#     ax5_twin.set_xlim(0, 21)
-#     ax5_twin.set_ylabel("ratio", color="black", fontsize=fontsize_labels)
-#     ax5_twin.set_xlabel("radius [pixels]", fontsize=fontsize_labels)
-#     ax5_twin.tick_params(axis="y", labelcolor="black")
-
-#     # Add legend to the first subplot (energy)
-#     legend_elements = [
-#         Line2D(
-#             [0],
-#             [0],
-#             color=color,
-#             lw=2,
-#             label=label,
-#             linestyle="--"
-#             if len(features_list) > 2
-#             and (
-#                 features is features_list[2]
-#                 or len(features_list) > 3
-#                 and (features is features_list[3])
-#             )
-#             else "-",
-#         )
-#         for color, label, features in zip(colors, labels, features_list)
-#     ]
-#     # Create the figure
-#     ax5.legend(handles=legend_elements, loc="upper right", fontsize=fontsize_labels - 5, ncol=2)
-#     ax2.legend(handles=legend_elements, loc="upper right", fontsize=fontsize_labels - 5, ncol=2)
-#     ax3.legend(handles=legend_elements, loc="upper right", fontsize=fontsize_labels - 5, ncol=2)
-#     ax0.legend(handles=legend_elements, loc="upper right", fontsize=fontsize_labels - 5, ncol=2)
-#     ax4.legend(handles=legend_elements, loc="upper right", fontsize=fontsize_labels - 5, ncol=2)
-#     ax1.legend(handles=legend_elements, loc="upper right", fontsize=fontsize_labels - 5, ncol=2)
-#     ax1.set_title(f"Material: {material}", fontsize=22)
-
-#     return fig
-
-
 def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = None, material: str = None, **kwargs):
     num_sets = len(feature_sets)
     print("Num sets: ", num_sets)
@@ -1897,7 +1488,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     if material == "G4_Pb_gamma":
         energy_sum = 2400
     elif material == "G4_Pb_e-":
-        energy_sum = 3000
+        energy_sum = 2500
     else:
         energy_sum = 2000
 
@@ -1906,10 +1497,11 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
         n_hits = 1700
     elif "W_e-" in material or "Pb_gamma" in material:
         n_hits = 2000
-    elif material == "G4_Pb_e-":
+    elif "Pb_e-" in material:
         n_hits = 2700
     else:
-        raise ValueError(f"Unknown material/PID combination: {material}")
+        n_hits = 2200
+
 
     energy_bins = np.logspace(np.log10(0.01), np.log10(energy), 50)  # Logarithmic bins for energy
     energy_sum_bins = np.arange(0, energy_sum, 75)
@@ -1922,13 +1514,16 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     elif material == "G4_W_e-":
         bins_cog = np.arange(5,17,0.5)
     elif material == "G4_Pb_gamma":
-        bins_cog = np.arange(11, 30, 0.5)
+        bins_cog = np.arange(12.5, 28, 0.5)
     elif material == "G4_Pb_e-":
         bins_cog = np.arange(8, 20, 0.5)
+    elif material == "G4_Ta_e-":
+        bins_cog = np.arange(6., 18, 0.5)
     else:
         bins_cog = np.arange(0, 31.5, 0.5)
 
     bins_z = np.arange(0, 31.5, 1)
+
 
     mpl.rcParams["xtick.labelsize"] = 16
     mpl.rcParams["ytick.labelsize"] = 16
@@ -1981,7 +1576,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
         _, gen_hists, _ , gen_uncertainties = fine_tuning_hists([feature_sets[0], feature_sets[i]], material=material)
         
         # Plot generated data
-        if material == "G4_W_e-":
+        if material == "G4_W_e-" or material == "G4_Ta_e-" or material == "G4_Pb_e-":
             # Step to zero for electrons
             energy_sum_bins_with_zero = np.insert(energy_sum_bins, 0, 0)  
             ax1.step(energy_sum_bins_with_zero, np.concatenate(([0], gen_hists["shower_energy"], [0])),
@@ -2075,7 +1670,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ymin, ymax = ax0.get_ylim()
     ax0.set_ylim(ymin, ymax + 1620 * ymax)
     ax0.set_ylim(bottom=0.1)
-    ax0.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=0.15)
+    ax0.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
 
     ax1.set_ylabel("normalized", fontsize=fontsize_labels)
     ax1_twin.set_xlabel("energy sum [MeV]", fontsize=fontsize_labels)
@@ -2085,7 +1680,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax1.set_ylim(bottom=0)
     ymin, ymax = ax1.get_ylim()
     ax1.set_ylim(ymin, ymax + 0.45 * ymax)
-    ax1.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=0.15)
+    ax1.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
 
     ax2.set_ylabel("normalized", fontsize=fontsize_labels)
     ax2_twin.set_xlabel("number of hits", fontsize=fontsize_labels)
@@ -2095,7 +1690,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax2.set_ylim(bottom=0)
     ymin, ymax = ax2.get_ylim()
     ax2.set_ylim(ymin, ymax + 0.44 * ymax)
-    ax2.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=0.15)
+    ax2.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
 
     ax3.set_ylabel("normalized", fontsize=fontsize_labels)
     ax3_twin.set_xlabel("center of gravity Z [layer]", fontsize=fontsize_labels)
@@ -2105,7 +1700,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax3.set_ylim(bottom=0)
     ymin, ymax = ax3.get_ylim()
     ax3.set_ylim(ymin, ymax + 0.48 * ymax)
-    ax3.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=0.15)
+    ax3.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
 
     ax4.set_ylabel("energy [MeV]", fontsize=fontsize_labels)
     ax4_twin.set_xlabel("layer", fontsize=fontsize_labels)
@@ -2115,7 +1710,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax4.set_ylim(bottom=0.1)
     ymin, ymax = ax4.get_ylim()
     ax4.set_ylim(ymin, ymax + 40 * ymax)
-    ax4.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=0.15)
+    ax4.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
 
     ax5.set_ylabel("energy [MeV]", fontsize=fontsize_labels)
     ax5_twin.set_xlabel("radius [pixels]", fontsize=fontsize_labels)
@@ -2125,7 +1720,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax5.set_ylim(bottom=0.1)
     ymin, ymax = ax5.get_ylim()
     ax5.set_ylim(ymin, ymax + 40 * ymax)
-    ax5.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=0.15)
+    ax5.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
 
     for ax_twin, ax, xlim in [(ax0_twin, ax0, None), (ax1_twin, ax1, None), (ax2_twin, ax2, None),
                                (ax3_twin, ax3, None), (ax4_twin, ax4, (0, 30)), (ax5_twin, ax5, (0, 21))]:
@@ -2182,7 +1777,8 @@ def decode_hits(tokens, energies, grid_size=30, SOS_token=0, EOS_token=27001,PAD
 
         
 
-def read_generated(file_path,tokenizer,material_list=["G4_W_gamma","G4_Ta_gamma","G4_Pb_gamma"],num_showers=-1,material="G4_W"):
+def read_generated(file_path,tokenizer,material_list=["G4_W_gamma","G4_Ta_gamma","G4_Pb_gamma"],
+                    num_showers=-1,material="G4_W",apply_correction=False,topk=3,shift=10):
     with h5py.File(file_path,"r") as h5file:
         showers = h5file['showers'][()]
 
@@ -2208,7 +1804,7 @@ def read_generated(file_path,tokenizer,material_list=["G4_W_gamma","G4_Ta_gamma"
         print(f"Total {material} showers in file: {total_showers}")
         
         for i,shower in enumerate(showers):
-            # if i == 5000: break # for testing
+            #if i == 10000: break # for testing
             init_E,spatial,energy,spatial_truth,energy_truth,material_index = shower
             mat = material_list[material_index]
             # print(f"Shower {i}: Material index {material_index} -> {mat}")
@@ -2217,8 +1813,13 @@ def read_generated(file_path,tokenizer,material_list=["G4_W_gamma","G4_Ta_gamma"
             
             # Primary decode step
             # Decode indices to x,y,z and filter tokens
-            x,y,z,E = decode_hits(spatial,energy)
-            E = tokenizer.de_tokenize(E) # convert energy tokens back to energy values
+            x,y,z,E = decode_hits(spatial,energy) 
+            E = tokenizer.de_tokenize(E)
+            if apply_correction:
+                if E.shape[0] > 5: 
+                    top_k = np.argpartition(E, -topk)[-topk:]  # Get indices of top k energies
+                    x[top_k] += shift # Shift top k hits back 
+                    x = np.clip(x, 0, 29) # Ensure we don't go out of bounds
 
             xt,yt,zt,Et = decode_hits(spatial_truth,energy_truth)
             
@@ -2387,7 +1988,7 @@ def fine_tuning_hists(feature_sets: list, material: str = None, **kwargs):
     if material == "G4_Pb_gamma":
         energy_sum = 2400
     elif material == "G4_Pb_e-":
-        energy_sum = 3000
+        energy_sum = 2500
     else:
         energy_sum = 2000
 
@@ -2396,10 +1997,11 @@ def fine_tuning_hists(feature_sets: list, material: str = None, **kwargs):
         n_hits = 1700
     elif "W_e-" in material or "Pb_gamma" in material:
         n_hits = 2000
-    elif material == "G4_Pb_e-":
+    elif "Pb_e-" in material:
         n_hits = 2700
     else:
-        raise ValueError(f"Unknown material/PID combination: {material}")
+        n_hits = 2200
+
 
     energy_bins = np.logspace(np.log10(0.01), np.log10(energy), 50)  # Logarithmic bins for energy
     energy_sum_bins = np.arange(0, energy_sum, 75)
@@ -2412,9 +2014,11 @@ def fine_tuning_hists(feature_sets: list, material: str = None, **kwargs):
     elif material == "G4_W_e-":
         bins_cog = np.arange(5,17,0.5)
     elif material == "G4_Pb_gamma":
-        bins_cog = np.arange(11, 30, 0.5)
+        bins_cog = np.arange(12.5, 28, 0.5)
     elif material == "G4_Pb_e-":
         bins_cog = np.arange(8, 20, 0.5)
+    elif material == "G4_Ta_e-":
+        bins_cog = np.arange(6., 18, 0.5)
     else:
         bins_cog = np.arange(0, 31.5, 0.5)
 
@@ -2680,42 +2284,54 @@ def make_fine_tune_hists(base_dir,tokenizer,material_list=["G4_W","G4_Ta","G4_Pb
 def plot_fine_tune_comparison(datasets, material_list, material, dataset_sizes, output_dir="FineTuningStudies"):  
     if material == "G4_Pb_gamma":
         energy_sum = 2400
+    elif material == "G4_Pb_e-":
+        energy_sum = 2500
     else:
         energy_sum = 2000
 
     energy = 70
     if "gamma" in material and "Pb" not in material:
         n_hits = 1700
-    elif "e-" in material or "Pb" in material:
+    elif "W_e-" in material or "Pb_gamma" in material:
         n_hits = 2000
+    elif "Pb_e-" in material:
+        n_hits = 2700
     else:
-        raise ValueError(f"Unknown material/PID combination: {material}")
+        n_hits = 2200
 
-    energy_bins = np.logspace(np.log10(0.01), np.log10(energy), 50)
+
+
+    energy_bins = np.logspace(np.log10(0.01), np.log10(energy), 50)  # Logarithmic bins for energy
     energy_sum_bins = np.arange(0, energy_sum, 75)
-    voxel_bins = np.arange(0, n_hits, 50)
-    dist_e_bins = np.arange(0, 21, 1)
+    voxel_bins = np.arange(0, n_hits, 50)  # The number of hits
+    dist_e_bins = np.arange(0, 21, 1)  # The distance
     if material == "G4_W_gamma":
         bins_cog = np.arange(8, 22, 0.5)
     elif material == "G4_Ta_gamma":
-        bins_cog = np.arange(10, 25, 0.5)
+        bins_cog = np.arange(10,25,0.5)
     elif material == "G4_W_e-":
-        bins_cog = np.arange(5, 17, 0.5)
+        bins_cog = np.arange(5,17,0.5)
     elif material == "G4_Pb_gamma":
-        bins_cog = np.arange(11, 30, 0.5)
+        bins_cog = np.arange(12.5, 28, 0.5)
+    elif material == "G4_Pb_e-":
+        bins_cog = np.arange(8, 20, 0.5)
+    elif material == "G4_Ta_e-":
+        bins_cog = np.arange(6., 18, 0.5)
     else:
         bins_cog = np.arange(0, 31.5, 0.5)
+
     bins_z = np.arange(0, 31.5, 1)
+
 
     energy_bins_centers = (energy_bins[:-1] + energy_bins[1:]) / 2
     energy_sum_bins_centers = (energy_sum_bins[:-1] + energy_sum_bins[1:]) / 2
     voxel_bins_centers = (voxel_bins[:-1] + voxel_bins[1:]) / 2
     dist_e_bins_centers = (dist_e_bins[:-1] + dist_e_bins[1:]) / 2
-    bins_cog_centers = (bins_cog[:-1] + bins_cog[1:]) / 2
+    bins_cog_centers = (bins_cog[:-1] + bins_cog[1:]) / 2   
     bins_z_centers = (bins_z[:-1] + bins_z[1:]) / 2
 
-    labels = [f"{size} samples" for size in dataset_sizes]
-    colors = ["cornflowerblue", "green", "red", "magenta"][:len(datasets)]
+    labels = [f"{size}" for size in dataset_sizes]
+    colors = ["cornflowerblue", "darkorange", "green", "purple"][:len(datasets)]
 
     mpl.rcParams["xtick.labelsize"] = 16
     mpl.rcParams["ytick.labelsize"] = 16
@@ -2747,30 +2363,44 @@ def plot_fine_tune_comparison(datasets, material_list, material, dataset_sizes, 
         gen_hists = dataset["gen"]
         label = labels[i]
         color = colors[i]
-        linestyle = "-" if i == 0 else "--"  # First is solid (Geant4), rest are dashed
-
+        # linestyle = "-" if i == 0 else "--"  # First is solid (Geant4), rest are dashed
+        linestyle = "-"  
         # Plot truth only on first iteration
+        alpha = 0.95
         if i == 0:
-            ax0.step(energy_bins, np.append(truth_hists["energy"][0], 0), 
-                    where='post', linestyle=linestyle, lw=2, label="Geant4", color="black")
+            if material == "G4_W_e-" or material == "G4_Ta_e-" or material == "G4_Pb_e-":
+                # Step to zero for electrons
+                    # Plot truth
+                
+                #ax0.fill_between(energy_bins, 0, np.append(truth_hists["energy"], 0), 
+                #        step='post', alpha=alpha, color=colors[0], label="Geant4")
+                energy_sum_bins_with_zero = np.insert(energy_sum_bins, 0, 0)  
+                ax1.fill_between(energy_sum_bins_with_zero, np.concatenate(([0], truth_hists["shower_energy"][0], [0])),
+                        step='post', label="Geant4", color="lightgrey", alpha=alpha)
+                voxel_bins_with_zero = np.insert(voxel_bins, 0, 0)  
+                ax2.fill_between(voxel_bins_with_zero, np.concatenate(([0], truth_hists["voxel"][0], [0])),
+                        step='post', label="Geant4", color="lightgrey", alpha=alpha)
+            else:
+                ax1.fill_between(energy_sum_bins, np.append(truth_hists["shower_energy"][0], 0),
+                        step='post', label="Geant4", color="lightgrey",alpha=alpha)
+                
+                ax2.fill_between(voxel_bins, np.append(truth_hists["voxel"][0], 0),
+                        step='post', label="Geant4", color="lightgrey",alpha=alpha)
+                
+            ax0.fill_between(energy_bins, np.append(truth_hists["energy"][0], 0), 
+                    step='post', label="Geant4", color="lightgrey", alpha=alpha)
             
-            ax1.step(energy_sum_bins, np.append(truth_hists["shower_energy"][0], 0),
-                    where='post', linestyle=linestyle, lw=2, label="Geant4", color="black")
+            ax3.fill_between(bins_cog, np.append(truth_hists["z_zero"][0], 0),
+                    step='post', label="Geant4", color="lightgrey", alpha=alpha)
             
-            ax2.step(voxel_bins, np.append(truth_hists["voxel"][0], 0),
-                    where='post', linestyle=linestyle, lw=2, label="Geant4", color="black")
+            ax4.fill_between(bins_z, np.append(truth_hists["hits"][0], 0),
+                    step='post', label="Geant4", color="lightgrey", alpha=alpha)
             
-            ax3.step(bins_cog, np.append(truth_hists["z_zero"][0], 0),
-                    where='post', linestyle=linestyle, lw=2, label="Geant4", color="black")
-            
-            ax4.step(bins_z, np.append(truth_hists["hits"][0], 0),
-                    where='post', linestyle=linestyle, lw=2, label="Geant4", color="black")
-            
-            ax5.step(dist_e_bins, np.append(truth_hists["pixel"][0], 0),
-                    where='post', linestyle=linestyle, lw=2, label="Geant4", color="black")
+            ax5.fill_between(dist_e_bins, np.append(truth_hists["pixel"][0], 0),
+                    step='post', label="Geant4", color="lightgrey", alpha=alpha)
         
         # Plot generated data
-        if material == "G4_W_e-":
+        if material == "G4_W_e-" or material == "G4_Ta_e-" or material == "G4_Pb_e-":
             # Step to zero for electrons
             energy_sum_bins_with_zero = np.insert(energy_sum_bins, 0, 0)  
             ax1.step(energy_sum_bins_with_zero, np.concatenate(([0], gen_hists["shower_energy"][0], [0])),
@@ -2867,7 +2497,7 @@ def plot_fine_tune_comparison(datasets, material_list, material, dataset_sizes, 
     ymin, ymax = ax0.get_ylim()
     ax0.set_ylim(ymin, ymax + 1620 * ymax)
     ax0.set_ylim(bottom=0.1)
-    ax0.legend(loc="upper right", fontsize=fontsize_labels - 8,ncol=2,columnspacing=0.2)
+    ax0.legend(loc="upper right", fontsize=fontsize_labels - 4,ncol=2)#,columnspacing=0.2)
 
     ax1.set_ylabel("normalized", fontsize=fontsize_labels)
     ax1_twin.set_xlabel("energy sum [MeV]", fontsize=fontsize_labels)
@@ -2877,7 +2507,7 @@ def plot_fine_tune_comparison(datasets, material_list, material, dataset_sizes, 
     ax1.set_ylim(bottom=0)
     ymin, ymax = ax1.get_ylim()
     ax1.set_ylim(ymin, ymax + 0.45 * ymax)
-    ax1.legend(loc="upper right", fontsize=fontsize_labels - 8,ncol=2,columnspacing=0.2)
+    ax1.legend(loc="upper right", fontsize=fontsize_labels - 4,ncol=2)#,columnspacing=0.2)
 
     ax2.set_ylabel("normalized", fontsize=fontsize_labels)
     ax2_twin.set_xlabel("number of hits", fontsize=fontsize_labels)
@@ -2887,7 +2517,7 @@ def plot_fine_tune_comparison(datasets, material_list, material, dataset_sizes, 
     ax2.set_ylim(bottom=0)
     ymin, ymax = ax2.get_ylim()
     ax2.set_ylim(ymin, ymax + 0.44 * ymax)
-    ax2.legend(loc="upper right", fontsize=fontsize_labels - 8,ncol=2,columnspacing=0.2)
+    ax2.legend(loc="upper right", fontsize=fontsize_labels - 4,ncol=2)#,columnspacing=0.2)
 
     ax3.set_ylabel("normalized", fontsize=fontsize_labels)
     ax3_twin.set_xlabel("center of gravity Z [layer]", fontsize=fontsize_labels)
@@ -2897,7 +2527,7 @@ def plot_fine_tune_comparison(datasets, material_list, material, dataset_sizes, 
     ax3.set_ylim(bottom=0)
     ymin, ymax = ax3.get_ylim()
     ax3.set_ylim(ymin, ymax + 0.48 * ymax)
-    ax3.legend(loc="upper right", fontsize=fontsize_labels - 8,ncol=2,columnspacing=0.2)
+    ax3.legend(loc="upper right", fontsize=fontsize_labels - 4,ncol=2)#,columnspacing=0.2)
 
     ax4.set_ylabel("energy [MeV]", fontsize=fontsize_labels)
     ax4_twin.set_xlabel("layer", fontsize=fontsize_labels)
@@ -2907,7 +2537,7 @@ def plot_fine_tune_comparison(datasets, material_list, material, dataset_sizes, 
     ax4.set_ylim(bottom=0.1)
     ymin, ymax = ax4.get_ylim()
     ax4.set_ylim(ymin, ymax + 40 * ymax)
-    ax4.legend(loc="upper right", fontsize=fontsize_labels - 8,ncol=2,columnspacing=0.2)
+    ax4.legend(loc="upper right", fontsize=fontsize_labels - 4,ncol=2)#,columnspacing=0.2)
 
     ax5.set_ylabel("energy [MeV]", fontsize=fontsize_labels)
     ax5_twin.set_xlabel("radius [pixels]", fontsize=fontsize_labels)
@@ -2917,7 +2547,7 @@ def plot_fine_tune_comparison(datasets, material_list, material, dataset_sizes, 
     ax5.set_ylim(bottom=0.1)
     ymin, ymax = ax5.get_ylim()
     ax5.set_ylim(ymin, ymax + 40 * ymax)
-    ax5.legend(loc="upper right", fontsize=fontsize_labels - 8,ncol=2,columnspacing=0.2)
+    ax5.legend(loc="upper right", fontsize=fontsize_labels - 4,ncol=2)#,columnspacing=0.2)
 
     for ax_twin, ax, xlim in [(ax0_twin, ax0, None), (ax1_twin, ax1, None), (ax2_twin, ax2, None),
                                (ax3_twin, ax3, None), (ax4_twin, ax4, (0, 30)), (ax5_twin, ax5, (0, 21))]:
@@ -2935,4 +2565,38 @@ def plot_fine_tune_comparison(datasets, material_list, material, dataset_sizes, 
 
 
 
-  
+def plot_bias_comp(file_path,tokenizer,materials_to_plot=None,num_showers=-1,material_list=["G4_W","G4_Ta","G4_Pb"],comparison_path=None):
+    
+    if materials_to_plot is None:
+        raise ValueError("materials_to_plot must be provided as a list of material names.")
+
+    os.makedirs("Plots",exist_ok=True)
+    filename = file_path.split("/")[-1][:-3]
+
+    for material in materials_to_plot:
+        print("Making plots for material:",material)
+        if material == "G4_Pb_e-":
+            topk = 3
+            shift = 10
+        elif material == "G4_Ta_e-":
+            topk = 1
+        else:
+            raise ValueError(f"Unexpected material: {material}. Expected 'G4_Pb_e-' or 'G4_Ta_e-'.")
+
+        corrected_generated_features, ground_truth_features = read_generated(file_path, tokenizer, material_list, num_showers, material,
+                                                                            apply_correction=True,topk=topk)
+        generated_features,_ = read_generated(file_path, tokenizer, material_list, num_showers, material,apply_correction=False)
+
+        labels = ["Geant4", "Uncalibrated","Calibrated"]
+        colors = ["lightgrey", "green", "cornflowerblue"] 
+        input_features = [ground_truth_features, generated_features,corrected_generated_features]
+
+        fig = plot_paper_plots(
+           input_features,
+           labels=labels,
+           colors=colors, material=material
+        )
+
+
+        # fig.tight_layout()
+        fig.savefig(f"Plots/{filename}_{material}_bias_comparison.pdf", dpi=300)

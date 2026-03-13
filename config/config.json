@@ -1,0 +1,126 @@
+{
+  "name": "Test_Model",
+  "seed": 42,
+  "digitize_energy": true,
+  "use_amp": true,
+  "material_list": ["G4_W_gamma", "G4_Ta_gamma","G4_Pb_gamma","G4_W_e-","G4_Ta_e-","G4_Pb_e-"],
+  "particle_list": ["gamma","e-"],
+  "base_model_type": "gamma",
+  "output": {
+    "dir": "Trained_Models"
+  },
+  "dataset": {
+    "tracks_per_file": 10000,
+    "base_dir": null,
+    "training": {
+      "G4_Pb_gamma_train_files": "data/Pb_Files_train.txt",
+      "G4_W_gamma_train_files": "data/W_Files_train.txt",
+      "G4_Ta_gamma_train_files": "data/Ta_Files_train.txt",
+      "G4_Pb_e-_train_files": "data/Pb_Electron_Files_train.txt",
+      "G4_W_e-_train_files": "data/W_Electron_Files_train.txt",
+      "G4_Ta_e-_train_files": "data/Ta_Electron_Files_train.txt"
+    },
+    "validation": {
+      "G4_Pb_gamma_val_files": "data/Pb_Files_val.txt",
+      "G4_W_gamma_val_files": "data/W_Files_val.txt",
+      "G4_Ta_gamma_val_files": "data/Ta_Files_val.txt",
+      "G4_Pb_e-_val_files": "data/Pb_Electron_Files_val.txt",
+      "G4_W_e-_val_files": "data/W_Electron_Files_val.txt",
+      "G4_Ta_e-_val_files": "data/Ta_Electron_Files_val.txt"
+    },
+    "testing": {
+      "G4_Pb_gamma_test_files": "data//Pb_Files_test.txt",
+      "G4_W_gamma_test_files_": "data/W_Files_test.txt",
+      "G4_W_gamma_test_files": "data/W_Gamma_80GeV_Files.txt",
+      "G4_Ta_gamma_test_files": "data/Ta_Files_test.txt",
+      "G4_Pb_e-_test_files": "data/Pb_Electron_Files_test.txt",
+      "G4_W_e-_test_files": "data/W_Electron_Files_test.txt",
+      "G4_Ta_e-_test_files": "data/Ta_Electron_Files_test.txt"
+    },
+    "in_memory": "in_memory"
+  },
+      "special_tokens":{
+        "pad_token": 27002,
+        "EOS_token": 27001,
+        "SOS_token": 0,
+        "energy_EOS_token": 25001,
+        "energy_pad_token": 25002
+    },
+  "model": {
+    "vocab_size": 27003,
+    "energy_vocab": 25003,
+    "embed_dim": 256,
+    "attn_heads": [8,8,8],
+    "num_blocks": 6,
+    "hidden_units": 256,
+    "mlp_scale": 2,
+    "drop_rates": [0.0, 0.0, 0.0],
+    "max_seq_length": 2700,
+    "use_MoE": true,
+    "LoRA_r": 128,
+    "LoRA_alpha": 32,
+    "enable_head_LoRA": true,
+    "enable_vocab_LoRA": false,
+    "learnable_vocabs": true,
+    "enable_embedding_adapter": false,
+    "vocab_LoRA_scale": 16,
+    "use_RoPE": true,
+    "is_expanded": false
+  },
+  "stats": {
+    "global_energy_max": 100.0,
+    "global_energy_min": 10.0,
+    "token_energy_max": 35.0,
+    "token_energy_min": 1e-15,
+    "token_energy_res": 0.0014
+  },
+  "optimizer": {
+    "lr": 0.001,
+    "lr_ft": 0.0001,
+    "decay_vocab": 0.1,
+    "decay_else": 0.0,
+    "alpha": 0.001
+  },
+  "num_epochs": 100,
+  "num_epochs_MoE": 100,
+  "train_notes": ["Batch size is important for LoRA - too large and it does not capture stochasticity. Try ~ 25.",
+           "Learning for LoRA should also scale with dataset size - larger data ~ 0.0002, fewer data try ~ 0.001 - needs jumps.",
+           "Batch size for training - 40 worked well, init LR of 0.001 was also fine.",
+           "For fine tuning experts only - again depending on dataset size you will want to scale LR accordingly.",
+           "For few thousands - 0.001 worked fine. For hundreds of thousands decrease ~ 0.0002.",
+           "We effectively want to balance step size with noise in the dataset. Too small a LR and we can collapse",
+           "too large and we jump around the loss landscape too much to converge."],
+  "inference_notes": ["Scale memory usage with base sizes - primary overheard will be seq lengths",
+           "Enabling dynamic temperature can be beneficial in certain cases - depenends on pre-training/tuning."],
+  "dataloader": {
+        "train": {
+            "num_workers": 2,
+            "prefetch_factor": 1,
+            "batch_size": 40,
+            "batch_size_ft": 25,
+            "chunk_size": 10
+        },
+        "val": {
+            "batch_size": 40,
+            "batch_size_ft": 25,
+            "num_workers": 0,
+            "chunk_size": 20
+        },
+        "test": {
+            "batch_size": 256,
+            "batch_size_ft": 256,
+            "num_workers": 0
+        }
+  },
+  "Inference": {
+    "model_path_": "Trained_Models/full_pre_trained_model.pth",
+    "output_file_": "my_generations.h5",
+    "full_fine_tune_path": "Generations/my_generations.h5",
+    "batch_size": 1200,
+    "num_workers": 0,
+    "initial_energy_min": 10.0,
+    "initial_energy_max": 100.0,
+    "num_showers": 10000,
+    "flush_size": 1e5
+  }
+}

@@ -16,6 +16,12 @@
 *.csv
 
 
+config/CA_config_copy.json
+config/CA_config_dist_copy.json
+config/CA_config.json
+config/CA_config_dist.json
+config/electron_config.json
+
 # Ignore system files
 .DS_Store
 
@@ -33,8 +39,8 @@ dist/
 data/
 
 # ignore config
-config/
-
+# config/
+kube_config/
 # Ignore plotting for now
 plotting/
 Generations/

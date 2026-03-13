@@ -26,6 +26,7 @@ from dataloader.dataset import ECAL_Chunked_Dataset
 from dataloader.dataloader import CreateLoaderMoE
 
 from models.GPT import ECAL_GPT
+from models.losses import Focal_Loss
 from models.MoE import MoE
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -253,7 +254,12 @@ class Trainer:
 
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.pad_token)
         self.energy_ce = nn.CrossEntropyLoss(ignore_index=self.energy_pad_token) if self.digitize_energy else None
+        #self.loss_fn = Focal_Loss(ignore_index=self.pad_token)
+        #self.energy_ce = Focal_Loss(ignore_index=self.energy_pad_token) if self.digitize_energy else None
         self.energy_loss_fn = None  # you’ll need to define this or import it
+
+        # if rank == 0:
+        #     print("Testing Focal loss.")
 
         vocab_lora_params = []
         other_params = []

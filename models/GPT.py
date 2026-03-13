@@ -681,7 +681,7 @@ class ECAL_GPT(nn.Module):
             )
         return self._compiled_decode
 
-    def _allocate_kv_cache(self, batch_size, max_len, device, dtype=torch.float16):
+    def _allocate_kv_cache(self, batch_size, max_len, device, dtype=AMP_DTYPE):
         """
         Pre-allocate KV cache buffers to avoid concatenation overhead.
         
@@ -1065,12 +1065,8 @@ class ECAL_GPT(nn.Module):
 
                 # Adjust temperature if dynamic
                 if dynamic_temp:
-                    # temperature = self.__decreasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
-                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.025, min_temp=0.975)
-                    # temperature = self.__increasing_exp_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
-                    # temperature = self.__exp_dynamic_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
-                    # temperature = self.__increasing_sigmoid_temp(step, max_seq_len, min_temp=0.94,max_temp=1.06,k=12.0,center=0.55)
-                    # print("Timestep: {}, Temperature: {:.4f}".format(step, temperature))
+                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
+ 
                 if use_kv_cache:
                     if step == 0:
                         # FIRST STEP: [B, 2, E]
