@@ -113,8 +113,8 @@
         }
   },
   "Inference": {
-    "model_path_": "Trained_Models/full_pre_trained_model.pth",
-    "output_file_": "my_generations.h5",
+    "model_path": "Trained_Models/full_pre_trained_model.pth",
+    "output_file": "my_generations.h5",
     "full_fine_tune_path": "Generations/my_generations.h5",
     "batch_size": 1200,
     "num_workers": 0,
