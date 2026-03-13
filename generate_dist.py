@@ -137,7 +137,7 @@ class Generator:
         else:
             self.energy_dtype = np.float32
 
-        outfile = os.path.join("/sciclone/scr30/jgiroux/FM4CAL/Generations", self.args.output_file if self.args.output_file is not None else self.config['Inference']['output_file'])
+        outfile = os.path.join("Generations", self.args.output_file if self.args.output_file is not None else self.config['Inference']['output_file'])
         outfile = outfile.replace('.h5', f'_rank{self.rank}.h5')
         self.w = ShowerWriterCompound(outfile, token_dtype=self.token_dtype,
                             energy_dtype=self.energy_dtype, compression="lzf")
@@ -426,7 +426,7 @@ def main(config,args):
         materials_to_generate = material_list
         print("Generating for all materials in config: ", materials_to_generate)
 
-    outfile = os.path.join("/sciclone/scr30/jgiroux/FM4CAL/Generations", args.output_file if args.output_file is not None else config['Inference']['output_file'])
+    outfile = os.path.join("Generations", args.output_file if args.output_file is not None else config['Inference']['output_file'])
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
 

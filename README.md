@@ -31,12 +31,15 @@ The framework utilizes a core transformer backbone consisting of cross-attention
 
 # Example Tokenization
 
-Energy and space stem from independent vocabularies - given that the mapping between space and energy is many-to-many, the approximation holds. The independent sequences are merged within the model, and then predicted from independent heads. Example sequences are given below, where **I** denotes the initial energy of the particle.
+Energy and space stem from independent vocabularies—since the mapping between space and energy is many-to-many, they are treated independently. The sequences are merged within the model and predicted from separate heads.
 
-```
-**spatial** → { \( I \), SOS\(_p\), \( p_1, \ldots, p_n \), EOS\(_p\) }  
-**energy** → { \( I \), SOS\(_e\), \( e_1, \ldots, e_n \), EOS\(_e\) }
-```
+Where **I** = initial energy and **p/e** subscripts denote spatial/energy tokens:
+
+**Spatial sequence:**  
+`[I, SOS_p, p₁, p₂, ..., pₙ, EOS_p]`
+
+**Energy sequence:**  
+`[I, SOS_e, e₁, e₂, ..., eₙ, EOS_e]`
 
 # Training
 
