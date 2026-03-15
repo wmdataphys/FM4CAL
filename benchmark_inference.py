@@ -244,20 +244,28 @@ def sync():
         torch.cuda.synchronize()
 
 
-def profile_model(model, initial_energy, material_index, use_kv_cache, logger=None):
-    logger.info(f"\n===== Profiling (KV Cache = {use_kv_cache}) =====")
+def profile_model(model, initial_energy, material_index, use_kv_cache, particle_type, logger=None):
+    logger.info(f"\n===== Profiling (KV Cache = {use_kv_cache}, particle_type = {particle_type}) =====")
     model.eval()
     B_profile = min(16, initial_energy.shape[0])
     ie_small = initial_energy[:B_profile].clone()
     mi_small = material_index[:B_profile].clone()
     logger.info("Warming up...")
     with torch.inference_mode():
-        model.generate(initial_energy=ie_small, material_index=mi_small, max_seq_len=50, temperature=1.0, use_kv_cache=use_kv_cache)
+        model.generate(
+            initial_energy=ie_small, material_index=mi_small,
+            max_seq_len=50, temperature=1.0,
+            use_kv_cache=use_kv_cache, particle_type=particle_type,
+        )
     torch.cuda.synchronize()
     logger.info("Profiling...")
     with torch.inference_mode():
         with profiler.profile(activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.CUDA], record_shapes=False, with_stack=False, with_flops=True) as prof:
-            model.generate(initial_energy=ie_small, material_index=mi_small, max_seq_len=2100, temperature=1.0, use_kv_cache=use_kv_cache)
+            model.generate(
+                initial_energy=ie_small, material_index=mi_small,
+                max_seq_len=2100, temperature=1.0,
+                use_kv_cache=use_kv_cache, particle_type=particle_type,
+            )
             torch.cuda.synchronize()
     logger.info("\n----- Top 25 CUDA Kernels by GPU Time -----")
     logger.info(f"\n{prof.key_averages().table(sort_by='cuda_time_total', row_limit=25)}")
@@ -269,14 +277,31 @@ def profile_model(model, initial_energy, material_index, use_kv_cache, logger=No
     return prof
 
 
-def benchmark(model, initial_energy, material_index, *, use_kv_cache, use_cuda_graph=False, iters=50, warmup=10, max_seq_len=None, logger=None):
+def benchmark(model, initial_energy, material_index, *, use_kv_cache, use_cuda_graph=False,
+              iters=50, warmup=10, max_seq_len=None, particle_type="gamma", logger=None):
     if max_seq_len is None:
         max_seq_len = 2700
     model.eval()
+
+    # generate_with_cuda_graph has a distinct signature — it does not accept use_kv_cache.
     if use_cuda_graph:
-        generate_fn = lambda: model.generate_with_cuda_graph(initial_energy=initial_energy, material_index=material_index, max_seq_len=max_seq_len, temperature=1.0)
+        generate_fn = lambda: model.generate_with_cuda_graph(
+            initial_energy=initial_energy,
+            material_index=material_index,
+            max_seq_len=max_seq_len,
+            temperature=1.0,
+            particle_type=particle_type,
+        )
     else:
-        generate_fn = lambda: model.generate(initial_energy=initial_energy, material_index=material_index, max_seq_len=max_seq_len, temperature=1.0, use_kv_cache=use_kv_cache)
+        generate_fn = lambda: model.generate(
+            initial_energy=initial_energy,
+            material_index=material_index,
+            max_seq_len=max_seq_len,
+            temperature=1.0,
+            use_kv_cache=use_kv_cache,
+            particle_type=particle_type,
+        )
+
     with torch.inference_mode():
         for _ in tqdm(range(warmup), desc=f"Warmup (KV={use_kv_cache}, CUDAGraph={use_cuda_graph})", leave=False):
             generate_fn()
@@ -291,13 +316,19 @@ def benchmark(model, initial_energy, material_index, *, use_kv_cache, use_cuda_g
     return (t1 - t0) / iters, get_peak_memory_mb()
 
 
-def benchmark_all_modes(model, initial_energy, material_index, logger, iters=50, max_seq_len=None):
-    logger.info("\n===== Benchmarking All Generation Modes =====")
+def benchmark_all_modes(model, initial_energy, material_index, logger,
+                        iters=50, max_seq_len=None, particle_type="gamma"):
+    logger.info(f"\n===== Benchmarking All Generation Modes (particle_type={particle_type}) =====")
     results = {}
     for label, kv, cg in [("no_cache", False, False), ("kv_cache", True, False), ("cuda_graph", True, True)]:
         logger.info(f"\n--- Mode: {label} ---")
         try:
-            t, mem = benchmark(model, initial_energy, material_index, use_kv_cache=kv, use_cuda_graph=cg, iters=iters, max_seq_len=max_seq_len, logger=logger)
+            t, mem = benchmark(
+                model, initial_energy, material_index,
+                use_kv_cache=kv, use_cuda_graph=cg,
+                iters=iters, max_seq_len=max_seq_len,
+                particle_type=particle_type, logger=logger,
+            )
             results[label] = {'time': t, 'memory': mem}
             logger.info(f"  Time: {t*1000:.2f}ms | Memory: {mem:.1f}MB")
         except Exception as e:
@@ -311,23 +342,36 @@ def benchmark_all_modes(model, initial_energy, material_index, logger, iters=50,
     return results
 
 
-def benchmark_components(model, initial_energy, material_index, logger, max_seq_len=500):
-    logger.info("\n===== Component-Level Timing Analysis =====")
+def benchmark_components(model, initial_energy, material_index, logger,
+                         max_seq_len=500, particle_type="gamma"):
+    logger.info(f"\n===== Component-Level Timing Analysis (particle_type={particle_type}) =====")
     model.eval()
     device = initial_energy.device
     B = initial_energy.shape[0]
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    times = {k: 0.0 for k in ['embedding_token', 'embedding_pos', 'embedding_energy', 'embedding_energy_pos', 'forward_pass', 'logits_pixel', 'logits_energy', 'softmax_pixel', 'softmax_energy', 'multinomial_pixel', 'multinomial_energy', 'eos_handling']}
+    times = {k: 0.0 for k in [
+        'embedding_token', 'embedding_pos', 'embedding_energy', 'embedding_energy_pos',
+        'forward_pass', 'logits_pixel', 'logits_energy',
+        'softmax_pixel', 'softmax_energy',
+        'multinomial_pixel', 'multinomial_energy', 'eos_handling',
+    ]}
     if initial_energy.dim() == 1:
         initial_energy = initial_energy.unsqueeze(1)
     init_e_embed = model.initial_energy_embedding(initial_energy).unsqueeze(1).to(dtype)
+
     is_done = torch.zeros(B, dtype=torch.bool, device=device)
     idx_buffer = torch.zeros((B, max_seq_len + 1), device=device, dtype=torch.long)
     e_buffer = torch.zeros((B, max_seq_len + 1), device=device, dtype=torch.long)
     idx_buffer[:, 0] = model.SOS_token
     e_buffer[:, 0] = 0
     kv_caches = model._allocate_kv_cache(B, max_seq_len + 2, device, dtype)
-    lora_modules = model._get_lora_modules_for_particle("gamma")
+    lora_modules = model._get_lora_modules_for_particle(particle_type)
+
+    # Determine which positional embedding helper to use, mirroring generate()
+    use_rope = model.use_RoPE
+    has_lpe_pos    = (not use_rope) and (model.lpe_expansion_pos    is not None)
+    has_lpe_energy = (not use_rope) and (model.lpe_expansion_energy is not None)
+
     logger.info(f"Running instrumented generation for {max_seq_len} steps...")
     with torch.inference_mode():
         with torch.amp.autocast('cuda', dtype=dtype):
@@ -339,26 +383,61 @@ def benchmark_components(model, initial_energy, material_index, logger, max_seq_
                     torch.cuda.synchronize()
                     times[key] += time.perf_counter() - t0
                     return result
-                cur = slice(step, step+1)
-                tok_emb = timed('embedding_token', lambda: model.token_embedding(idx_buffer[:, cur]))
+
+                cur = slice(step, step + 1)
                 pos_idx = torch.full((B, 1), step, device=device, dtype=torch.long)
-                pos_emb = timed('embedding_pos', lambda: model.pos_embedding(pos_idx))
-                e_emb = timed('embedding_energy', lambda: model.energy_embedding(e_buffer[:, cur]))
-                e_pos_emb = timed('embedding_energy_pos', lambda: model.energy_pos_embedding(pos_idx))
-                if step == 0:
-                    x_t = torch.cat([init_e_embed, tok_emb + pos_emb], dim=1)
-                    e_t = torch.cat([init_e_embed, e_emb + e_pos_emb], dim=1)
+
+                tok_emb = timed('embedding_token', lambda: model.token_embedding(idx_buffer[:, cur]))
+
+                # Positional embedding: RoPE skips learned pos embeds; LPE expansion overrides base
+                if not use_rope:
+                    if has_lpe_pos:
+                        pos_emb = timed('embedding_pos', lambda: model.lpe_expansion_pos(pos_idx))
+                    else:
+                        pos_emb = timed('embedding_pos', lambda: model.pos_embedding(pos_idx))
+                    tok_emb = tok_emb + pos_emb
                 else:
-                    x_t, e_t = tok_emb + pos_emb, e_emb + e_pos_emb
-                h_t, kv_caches = timed('forward_pass', lambda: model.forward_decode_step(x_t, e_t, material_index, kv_caches=kv_caches, is_first_step=(step==0), lora_modules=lora_modules))
-                pixel_logits = timed('logits_pixel', lambda: model.logits_head(h_t[:, -1, :]))
-                energy_logits = timed('logits_energy', lambda: model.energy_head(h_t[:, -1, :]))
-                pixel_probs = timed('softmax_pixel', lambda: torch.softmax(pixel_logits, dim=-1, dtype=torch.float32))
+                    # Still account for the timing slot so totals are consistent
+                    timed('embedding_pos', lambda: None)
+
+                e_emb = timed('embedding_energy', lambda: model.energy_embedding(e_buffer[:, cur]))
+
+                if not use_rope:
+                    if has_lpe_energy:
+                        e_pos_emb = timed('embedding_energy_pos', lambda: model.lpe_expansion_energy(pos_idx))
+                    else:
+                        e_pos_emb = timed('embedding_energy_pos', lambda: model.energy_pos_embedding(pos_idx))
+                    e_emb = e_emb + e_pos_emb
+                else:
+                    timed('embedding_energy_pos', lambda: None)
+
+                if step == 0:
+                    x_t = torch.cat([init_e_embed, tok_emb + (pos_emb if not use_rope else 0)], dim=1) if not use_rope else torch.cat([init_e_embed, tok_emb], dim=1)
+                    e_t = torch.cat([init_e_embed, e_emb + (e_pos_emb if not use_rope else 0)], dim=1) if not use_rope else torch.cat([init_e_embed, e_emb], dim=1)
+                else:
+                    x_t = tok_emb
+                    e_t = e_emb
+
+                h_t, kv_caches = timed('forward_pass', lambda: model.forward_decode_step(
+                    x_t, e_t, material_index, kv_caches=kv_caches,
+                    is_first_step=(step == 0),
+                    particle_type=particle_type,
+                    lora_modules=lora_modules,
+                ))
+
+                # Use the correct output head (vocab LoRA or base)
+                has_vocab_lora = hasattr(model, 'vocab_LoRA') and particle_type in model.vocab_LoRA
+                pixel_logits  = timed('logits_pixel',  lambda: (model.vocab_LoRA[particle_type][0](h_t)[:, -1, :] if has_vocab_lora else model.logits_head(h_t[:, -1, :])))
+                energy_logits = timed('logits_energy', lambda: (model.vocab_LoRA[particle_type][1](h_t)[:, -1, :] if has_vocab_lora else model.energy_head(h_t[:, -1, :])))
+
+                pixel_probs  = timed('softmax_pixel',  lambda: torch.softmax(pixel_logits,  dim=-1, dtype=torch.float32))
                 energy_probs = timed('softmax_energy', lambda: torch.softmax(energy_logits, dim=-1, dtype=torch.float32))
-                idx_next = timed('multinomial_pixel', lambda: torch.multinomial(pixel_probs, num_samples=1))
-                e_next = timed('multinomial_energy', lambda: torch.multinomial(energy_probs, num_samples=1))
+                idx_next = timed('multinomial_pixel',  lambda: torch.multinomial(pixel_probs,  num_samples=1))
+                e_next   = timed('multinomial_energy', lambda: torch.multinomial(energy_probs, num_samples=1))
+
                 idx_next = idx_next.clamp(0, model.space_vocab - 1)
-                e_next = e_next.clamp(0, model.energy_vocab - 1)
+                e_next   = e_next.clamp(0, model.energy_vocab - 1)
+
                 def eos_step():
                     nonlocal is_done
                     newly_done = (e_next.squeeze(1) == model.EOS_energy_token) | (idx_next.squeeze(1) == model.EOS_token)
@@ -372,17 +451,20 @@ def benchmark_components(model, initial_energy, material_index, logger, max_seq_
                     e_store.masked_fill_(eos_mask, model.EOS_energy_token)
                     e_store.masked_fill_(pad_mask, model.energy_pad_token)
                     e_buffer[:, step + 1] = e_store
+
                 timed('eos_handling', eos_step)
+
                 if (step + 1) % 100 == 0 and torch.all(is_done):
                     logger.info(f"Early exit at step {step + 1}")
                     break
+
     total_time = sum(times.values())
     groups = {
-        'Embeddings': ['embedding_token', 'embedding_pos', 'embedding_energy', 'embedding_energy_pos'],
+        'Embeddings':   ['embedding_token', 'embedding_pos', 'embedding_energy', 'embedding_energy_pos'],
         'Forward Pass': ['forward_pass'],
         'Logits Heads': ['logits_pixel', 'logits_energy'],
-        'Softmax': ['softmax_pixel', 'softmax_energy'],
-        'Sampling': ['multinomial_pixel', 'multinomial_energy'],
+        'Softmax':      ['softmax_pixel', 'softmax_energy'],
+        'Sampling':     ['multinomial_pixel', 'multinomial_energy'],
         'EOS Handling': ['eos_handling'],
     }
     logger.info(f"\n{'='*60}")
@@ -460,12 +542,52 @@ def main(args):
         is_expanded=config['model']['is_expanded'],
     ).to(device)
 
-    checkpoint = torch.load(args.model_path, map_location=device)
-    model.load_state_dict(checkpoint["net_state_dict"], strict=True)
+    checkpoint = torch.load(args.model_path, map_location=device, weights_only=True)
+    _load_result = model.load_state_dict(checkpoint["net_state_dict"], strict=False)
+
+    # Keys that may legitimately be absent in older checkpoints.
+    # These are buffers added after training and are safely re-initialised by __init__.
+    _KNOWN_MISSING = {
+        "_load_balance_placeholder",   # scalar placeholder added to every layer
+        "router.expert_index",         # router buffer added to MoE layers
+    }
+
+    unexpected = _load_result.unexpected_keys
+    truly_missing = [
+        k for k in _load_result.missing_keys
+        if not any(known in k for known in _KNOWN_MISSING)
+    ]
+
+    if unexpected:
+        raise RuntimeError(
+            f"Unexpected keys in checkpoint (possible model mismatch):\n  " +
+            "\n  ".join(unexpected)
+        )
+    if truly_missing:
+        raise RuntimeError(
+            f"Missing keys in checkpoint that are NOT known safe buffers:\n  " +
+            "\n  ".join(truly_missing)
+        )
+
+    if _load_result.missing_keys:
+        logger.warning(
+            f"Checkpoint is missing {len(_load_result.missing_keys)} known-safe buffer(s) "
+            f"(re-initialised from __init__): {_load_result.missing_keys}"
+        )
     logger.info("Model loaded successfully.")
 
     model = model.to(device)
     model.device = device
+
+    # Validate particle_type against model's particle_list
+    if args.particle_type not in model.particle_list:
+        logger.warning(
+            f"--particle_type '{args.particle_type}' not in model.particle_list "
+            f"{model.particle_list}. Falling back to base_model_type='{model.base_model_type}'."
+        )
+        args.particle_type = model.base_model_type
+
+    logger.info(f"Using particle_type: {args.particle_type}")
 
     if args.fuse_qkv:
         logger.info("Fusing QKV projections...")
@@ -493,27 +615,51 @@ def main(args):
     logger.info(f"Batch size     : {args.batch_size}")
     logger.info(f"Iterations     : {args.iters}")
     logger.info(f"Max seq len    : {max_seq_len}")
+    logger.info(f"Particle type  : {args.particle_type}")
     logger.info("================================")
 
     if args.instrument:
-        benchmark_components(model, initial_energy, material_index, logger, max_seq_len=args.instrument_steps)
+        benchmark_components(
+            model, initial_energy, material_index, logger,
+            max_seq_len=args.instrument_steps,
+            particle_type=args.particle_type,
+        )
         return
 
     if args.profile:
-        profile_model(model, initial_energy, material_index, use_kv_cache=True, logger=logger)
+        profile_model(
+            model, initial_energy, material_index,
+            use_kv_cache=True,
+            particle_type=args.particle_type,
+            logger=logger,
+        )
         return
 
     if args.benchmark_all:
-        benchmark_all_modes(model, initial_energy, material_index, logger, iters=args.iters, max_seq_len=max_seq_len)
+        benchmark_all_modes(
+            model, initial_energy, material_index, logger,
+            iters=args.iters, max_seq_len=max_seq_len,
+            particle_type=args.particle_type,
+        )
         return
 
     if args.cuda_graph:
-        t, peak_mem_mb = benchmark(model, initial_energy, material_index, use_kv_cache=True, use_cuda_graph=True, iters=args.iters, max_seq_len=max_seq_len, logger=logger)
+        t, peak_mem_mb = benchmark(
+            model, initial_energy, material_index,
+            use_kv_cache=True, use_cuda_graph=True,
+            iters=args.iters, max_seq_len=max_seq_len,
+            particle_type=args.particle_type, logger=logger,
+        )
         label = "CUDA Graph    "
     else:
         if device == "cpu":
             torch.set_autocast_enabled(False)
-        t, peak_mem_mb = benchmark(model, initial_energy, material_index, use_kv_cache=True, use_cuda_graph=False, iters=args.iters, max_seq_len=max_seq_len, logger=logger)
+        t, peak_mem_mb = benchmark(
+            model, initial_energy, material_index,
+            use_kv_cache=True, use_cuda_graph=False,
+            iters=args.iters, max_seq_len=max_seq_len,
+            particle_type=args.particle_type, logger=logger,
+        )
         label = "KV Cache = True"
 
     samples_per_sec = args.batch_size / t
@@ -530,6 +676,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=70)
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--max_seq_len", type=int, default=None, help="Max sequence length. Defaults to max_seq_length in config.")
+    parser.add_argument("--particle_type", type=str, default="gamma",
+                        help="Particle type for LoRA / vocab head routing (must be in model.particle_list).")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--fuse_qkv", action="store_true", help="Fuse Q, K, V projections for faster inference")
     parser.add_argument("--quantize", action="store_true", help="Apply INT8 quantization using bitsandbytes")
