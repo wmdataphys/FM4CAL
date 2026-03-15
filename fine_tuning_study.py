@@ -1,5 +1,4 @@
 import os
-
 # Set these BEFORE importing torch
 os.environ["TORCH_LOGS"] = "-cudagraphs" # Explicitly subtract cudagraphs from logs
 os.environ["GLOG_minloglevel"] = "3"      # Suppress C++ Google Logs (3 = Fatal)
@@ -16,11 +15,8 @@ import argparse
 
 from plotting import make_fine_tune_hists,plot_fine_tune_comparison
 
-from models.GPT import ECAL_GPT
 from dataloader.tokenizer import EnergyTokenizer
-from dataloader.dataset import ECAL_Chunked_Dataset
-from dataloader.dataloader import CreateInferenceLoader
-from utils.utils import read_text, singular_value_checks
+
 
 def main(config,args):
     energy_res = config['stats']['token_energy_res']
@@ -48,8 +44,6 @@ if __name__ == "__main__":
     parser.add_argument('--output_file', type=str, default=None, help='Output file name for generated showers. Overrides config if set.')
     parser.add_argument('--base_dir', type=str, default=None, help='Base directory for fine-tuning studies. Overrides config if set.')
     args = parser.parse_args()
-
-    os.makedirs("Generations", exist_ok=True)
 
     # Load config
     with open(args.config, 'r') as f:

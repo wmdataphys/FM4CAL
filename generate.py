@@ -14,7 +14,7 @@ import pkbar
 from datetime import datetime
 import argparse
 
-from plotting import make_plots,visualize_vocab_LoRA
+from plotting import make_plots,visualize_vocab_LoRA,plot_bias_comp
 
 from models.GPT import ECAL_GPT
 from dataloader.tokenizer import EnergyTokenizer
@@ -151,7 +151,12 @@ def main(config,args):
 
     model.eval()
 
-
+    print("Photon params:")
+    print("Space vocab weight: ", model.logits_head.weight.data.cpu().numpy().mean())
+    print("Space vocab bias: ", model.logits_head.bias.data.cpu().numpy().mean())
+    print("Energy vocab weight: ", model.energy_head.weight.data.cpu().numpy().mean())
+    print("Energy vocab bias: ", model.energy_head.bias.data.cpu().numpy().mean())
+    print("Done.")
     # for name, param in model.named_parameters():
     #     if "lora" in name:
     #         print(f"Parameter {name} has value: {param.data.cpu().numpy()}")
@@ -176,67 +181,15 @@ def main(config,args):
             particle_type = "gamma"
         else:
             raise ValueError("Unknown particle type in material: ", material)
-
-    print("Particle type", particle_type)
-
-    for name, param in model.named_parameters():
-        if "lpe_expansion" in name:
-            print(f"LPE Expansion Parameter {name} has length: {param.shape} and value: {param.mean().data.cpu().numpy()}")
-            lpe_expansion_weight = param.data
-            if "pos" in name and not "energy" in name:
-                orig_weight = model.pos_embedding.weight.data
-            elif "energy" in name:
-                orig_weight = model.energy_pos_embedding.weight.data
-            else:
-                print("Unknown LPE expansion type in name: ", name)
-                continue
-
-            check_ = torch.allclose(lpe_expansion_weight[:orig_weight.shape[0]], orig_weight, atol=1e-5)
-            print(f"Check if LPE expansion weight matches original positional embedding for first {orig_weight.shape[0]} tokens: {check_}")
-            
-    for name, param in model.named_parameters():
-        if particle_type in name:
-            print(f"Parameter {name} has value: {param.mean().data.cpu().numpy()}")
-
-    for name, module in model.named_modules():
-        if particle_type in name:
-            if "particle_lora" in name and hasattr(module, 'lora_B_Q'):
-                # (A, B, r, alpha, layer_name, vocab=False):
-                print(f"\n=== SVD Check: {name} ===")
-                singular_value_checks(module.lora_A_Q, module.lora_B_Q, module.lora_r, module.scale, f"{name}.Q")
-                singular_value_checks(module.lora_A_K, module.lora_B_K, module.lora_r, module.scale, f"{name}.K")
-                singular_value_checks(module.lora_A_V, module.lora_B_V, module.lora_r, module.scale, f"{name}.V")
-                singular_value_checks(module.lora_A_c_proj, module.lora_B_c_proj, module.lora_r, module.scale, f"{name}.c_proj")
-
-            elif "vocab_lora" in name and hasattr(module, 'lora_B_vocab'):
-                print(f"\n=== SVD Check: {name} ===")
-                singular_value_checks(module.lora_A_vocab, module.lora_B_vocab, module.lora_r, module.scale, f"{name}", vocab=True)
-
-                if args.visualize_vocab_LoRA:
-                    if '0' in name:
-                        label = "Pixel"
-                        original_W = model.logits_head.weight.data
-                    elif '1' in name:
-                        label = "Energy"
-                        original_W = model.energy_head.weight.data
-                    else:
-                        label = "Unknown"
-                        print("Unknown vocab LoRA label for visualization. Exiting.")
-                        exit(1)
-
-                    print(f"\n=== Visualizing Vocab LoRA: {name} ===")
-                    visualize_vocab_LoRA(module.lora_A_vocab, module.lora_B_vocab,original_W,label )
-
         
-
     global_e_max = config['stats']['global_energy_max']
     global_e_min = config['stats']['global_energy_min']
     stats = {"Initial_Energy_Max": global_e_max, "Initial_Energy_Min": global_e_min}
     
     # test_files = [twb,tab,tpb]  # for quick testing
     # test_files = [test_files[0],test_files[1],test_files[-2],test_files[-1]]  
-    # test_files = test_files[:2] + test_files[-2:]  # for quick testing
-    # test_files = test_files[:2] # for quick testing
+    # test_files = test_files[:4] + test_files[-4:]  # for quick testing
+    # test_files = test_files[:4] # for quick testing
 
     gen_seq_len = args.gen_seq_len if args.gen_seq_len is not None else msl
 

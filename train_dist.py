@@ -83,7 +83,12 @@ class Trainer:
 
         self.use_amp = config['use_amp']
         if self.use_amp:
+            if self.rank == 0:
+                print("Using Automatic Mixed Precision (AMP)")
             self.scaler = GradScaler()
+        else:
+            if self.rank == 0:
+                print("Not using Automatic Mixed Precision (AMP)")
 
         self.use_MoE = bool(config['model']['use_MoE'])
         self.digitize_energy = bool(config['digitize_energy'])
@@ -180,7 +185,7 @@ class Trainer:
             self.optimizer.zero_grad()
 
             if self.use_amp:
-                with autocast(dtype=torch.float16):
+                with autocast(dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
                     logits, e, load_balance = self.model(tokens, energies, initial_energy, material_index=material_index, padding_mask=padding_mask)
 
                     logits = logits[:, skip_idx:, :]
@@ -209,17 +214,17 @@ class Trainer:
                 with torch.set_grad_enabled(True):
                     logits, e, load_balance = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask)
 
-                # Slice off the prepended initial energy token
-                logits = logits[:, skip_idx:, :]
-                e = e[:, skip_idx:, :]
+                    # Slice off the prepended initial energy token
+                    logits = logits[:, skip_idx:, :]
+                    e = e[:, skip_idx:, :]
 
-                pixel_loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), next_tokens.reshape(-1))
+                    pixel_loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), next_tokens.reshape(-1))
 
-                if not self.digitize_energy:
-                    regression_mask = ~torch.isin(next_tokens, torch.tensor([self.pad_token, self.SOS_token, self.EOS_token], device=next_tokens.device))
-                    energy_loss = self.energy_loss_fn(next_energies, e, regression_mask)
-                else:
-                    energy_loss = self.energy_ce(e.reshape(-1, e.size(-1)), next_energies.reshape(-1))
+                    if not self.digitize_energy:
+                        regression_mask = ~torch.isin(next_tokens, torch.tensor([self.pad_token, self.SOS_token, self.EOS_token], device=next_tokens.device))
+                        energy_loss = self.energy_loss_fn(next_energies, e, regression_mask)
+                    else:
+                        energy_loss = self.energy_ce(e.reshape(-1, e.size(-1)), next_energies.reshape(-1))
 
                 loss = pixel_loss + energy_loss + load_balance
                 loss.backward()
@@ -311,7 +316,7 @@ class Trainer:
                 'global_step': self.global_step,
             }, filename)
 
-def run_worker(rank, world_size, config, all_train_files, all_val_files, state_dict=None, run_val=True, write_path=None, checkpoint=None):
+def run_worker(rank, world_size, config, all_train_files, all_val_files, state_dict=None, run_val=False, write_path=None, checkpoint=None):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
@@ -384,7 +389,7 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, state_d
             val_loader, _ = trainer.load_chunked_dataset(all_val_files[random_idx].tolist(),verbose=False)
             trainer.on_epoch_end(val_loader,write_path)
         else:
-            trainer.on_epoch_end(write_path)
+            trainer.on_epoch_end(val_loader=None, write_path=write_path)
 
     dist.destroy_process_group()
 

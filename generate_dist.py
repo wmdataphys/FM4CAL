@@ -49,6 +49,7 @@ def create_model(config,expanded_seq_len=None):
     loRA_alpha = config['model']['LoRA_alpha']
     enable_head_LoRA = config['model']['enable_head_LoRA']
     enable_vocab_LoRA = config['model']['enable_vocab_LoRA']
+    learnable_vocabs = config['model']['learnable_vocabs']
     enable_embedding_adapter = config['model']['enable_embedding_adapter']
     vocab_LoRA_scale = config['model']['vocab_LoRA_scale']
     use_RoPE = config['model']['use_RoPE']
@@ -80,6 +81,7 @@ def create_model(config,expanded_seq_len=None):
                 enable_vocab_LoRA=enable_vocab_LoRA,
                 enable_embedding_adapter=enable_embedding_adapter,
                 vocab_LoRA_scale=vocab_LoRA_scale,
+                learnable_vocabs=learnable_vocabs,
                 use_RoPE=use_RoPE, is_expanded=is_expanded
                 )
 
@@ -135,8 +137,7 @@ class Generator:
         else:
             self.energy_dtype = np.float32
 
-        # Will remove this crime later - k8s giving permission errors and don't feel like debugging right now
-        outfile = os.path.join("/sciclone/scr30/jgiroux/FM4CAL/Generations", self.args.output_file if self.args.output_file is not None else self.config['Inference']['output_file'])
+        outfile = os.path.join("Generations", self.args.output_file if self.args.output_file is not None else self.config['Inference']['output_file'])
         outfile = outfile.replace('.h5', f'_rank{self.rank}.h5')
         self.w = ShowerWriterCompound(outfile, token_dtype=self.token_dtype,
                             energy_dtype=self.energy_dtype, compression="lzf")
@@ -415,6 +416,9 @@ def main(config,args):
     config['material_list'] = material_list
     config['particle_list'] = particle_list
 
+    print("Config material list: ", config['material_list'])
+    print("Config particle list: ", config['particle_list'])
+
     if args.materials_to_generate is not None:
         materials_to_generate = args.materials_to_generate
         print("Generating for specified materials: ", materials_to_generate)
@@ -422,7 +426,7 @@ def main(config,args):
         materials_to_generate = material_list
         print("Generating for all materials in config: ", materials_to_generate)
 
-    outfile = os.path.join("/sciclone/scr30/jgiroux/FM4CAL/Generations", args.output_file if args.output_file is not None else config['Inference']['output_file'])
+    outfile = os.path.join("Generations", args.output_file if args.output_file is not None else config['Inference']['output_file'])
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
 

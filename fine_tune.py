@@ -26,6 +26,7 @@ from dataloader.dataset import ECAL_Chunked_Dataset
 from dataloader.dataloader import CreateLoaderMoE
 
 from models.GPT import ECAL_GPT
+from models.losses import Focal_Loss
 from models.MoE import MoE
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -117,26 +118,32 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
     experts_per_class = net.num_experts // len(default_material_list)
     net.extend_model(materials_list + [material_to_add], closest_expert=closest_expert, particle_type=particle_type, weights=weights, pissa_init=enable_pissa)
 
-    if new_seq_len is not None:
-        assert new_seq_len > msl, "New sequence length must be greater than the current maximum sequence length."
-        
-        print("Extending sequence length to:", new_seq_len)
-        net.extend_sequence_length(new_seq_len)
-        print("\n========= Sequence Adapater Check ==========")
-        old_e_weight = net.energy_pos_embedding.weight.data
-        old_p_weight = net.pos_embedding.weight.data
+    if not use_RoPE:
+        if new_seq_len is not None:
+            assert new_seq_len > msl, "New sequence length must be greater than the current maximum sequence length."
+            
+            print("Extending sequence length to:", new_seq_len)
+            net.extend_sequence_length(new_seq_len)
+            print("\n========= Sequence Adapater Check ==========")
+            if not is_expanded:
+                print("LPE Expansion doen't exist yet, comparing to existing positional embeddings.")
+                old_e_weight = net.energy_pos_embedding.weight.data
+                old_p_weight = net.pos_embedding.weight.data
+            else:
+                print("LPE expansion exists, comparing to expanded positional embeddings.")
+                old_e_weight = net.lpe_expansion_energy.pos_embedding.weight.data
+                old_p_weight = net.lpe_expansion_pos.pos_embedding.weight.data
 
-        new_e_weight = net.lpe_expansion_energy.pos_embedding.weight[:old_e_weight.shape[0]].data
-        new_p_weight = net.lpe_expansion_pos.pos_embedding.weight[:old_p_weight.shape[0]].data
+            new_e_weight = net.lpe_expansion_energy.pos_embedding.weight[:old_e_weight.shape[0]].data
+            new_p_weight = net.lpe_expansion_pos.pos_embedding.weight[:old_p_weight.shape[0]].data
 
-        are_same_e = torch.allclose(old_e_weight, new_e_weight, rtol=1e-5)
-        are_same_p = torch.allclose(old_p_weight, new_p_weight, rtol=1e-5)
-        print(f"Energy Positional Embedding: New vs Old: {'MATCH' if are_same_e else 'DO NOT MATCH'}")
-        print(f"Positional Embedding: New vs Old: {'MATCH' if are_same_p else 'DO NOT MATCH'}")
-        print("=============================================")
-    else:
-        print("Using existing sequence length:", msl)
-
+            are_same_e = torch.allclose(old_e_weight, new_e_weight, rtol=1e-5)
+            are_same_p = torch.allclose(old_p_weight, new_p_weight, rtol=1e-5)
+            print(f"Energy Positional Embedding: New vs Old: {'MATCH' if are_same_e else 'DO NOT MATCH'}")
+            print(f"Positional Embedding: New vs Old: {'MATCH' if are_same_p else 'DO NOT MATCH'}")
+            print("=============================================")
+        else:
+            print("Using existing sequence length:", msl)
 
 
     print("\n========= New Expert Weight Check =========")
@@ -160,19 +167,29 @@ def create_model(config,fine_tune_path=None,default_material_list=['G4_W_gamma',
 
     if not net.enable_vocab_LoRA and net.learnable_vocabs:
         print("\n========= New Vocab Projection Check =========")
-        old_space_w = net.logits_head.weight.data
-        old_space_b = net.logits_head.bias.data
+        
+        if particle_type in net.vocab_LoRA and net.vocab_LoRA[particle_type][0] is not None:
+            # Particle type already exists - compare to existing vocab heads
+            print(f"Particle type '{particle_type}' already exists - comparing to existing vocab heads")
+            old_space_w = net.vocab_LoRA[particle_type][0].weight.data
+            old_space_b = net.vocab_LoRA[particle_type][0].bias.data
+            old_ene_w = net.vocab_LoRA[particle_type][1].weight.data
+            old_ene_b = net.vocab_LoRA[particle_type][1].bias.data
+        else:
+            # New particle type - compare to base model vocab heads
+            print(f"New particle type '{particle_type}' - comparing to base model vocab heads")
+            old_space_w = net.logits_head.weight.data
+            old_space_b = net.logits_head.bias.data
+            old_ene_w = net.energy_head.weight.data
+            old_ene_b = net.energy_head.bias.data
+        
         new_space_w = net.vocab_LoRA[particle_type][0].weight.data
         new_space_b = net.vocab_LoRA[particle_type][0].bias.data
-
-        old_ene_w = net.energy_head.weight.data
-        old_ene_b = net.energy_head.bias.data
         new_ene_w = net.vocab_LoRA[particle_type][1].weight.data
         new_ene_b = net.vocab_LoRA[particle_type][1].bias.data
 
         w_match = torch.allclose(old_space_w, new_space_w, rtol=1e-5)
         b_match = torch.allclose(old_space_b, new_space_b, rtol=1e-5)
-
         ew_match = torch.allclose(old_ene_w, new_ene_w, rtol=1e-5)
         eb_match = torch.allclose(old_ene_b, new_ene_b, rtol=1e-5)
 
@@ -200,7 +217,12 @@ class Trainer:
 
         self.use_amp = config['use_amp']
         if self.use_amp:
+            if self.rank == 0:
+                print("Using Automatic Mixed Precision (AMP)")
             self.scaler = GradScaler()
+        else:
+            if self.rank == 0:
+                print("Not using Automatic Mixed Precision (AMP)")
 
         self.use_MoE = bool(config['model']['use_MoE'])
         self.digitize_energy = bool(config['digitize_energy'])
@@ -232,7 +254,12 @@ class Trainer:
 
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.pad_token)
         self.energy_ce = nn.CrossEntropyLoss(ignore_index=self.energy_pad_token) if self.digitize_energy else None
+        #self.loss_fn = Focal_Loss(ignore_index=self.pad_token)
+        #self.energy_ce = Focal_Loss(ignore_index=self.energy_pad_token) if self.digitize_energy else None
         self.energy_loss_fn = None  # you’ll need to define this or import it
+
+        # if rank == 0:
+        #     print("Testing Focal loss.")
 
         vocab_lora_params = []
         other_params = []
