@@ -1514,13 +1514,17 @@ class ECAL_GPT(nn.Module):
             buffers['pos_idx'].zero_()
 
             # Compute embeddings for first step
-            sos_embed = (self.token_embedding(buffers['idx_buffer'][:, 0:1]) +
-                        self.pos_embedding(buffers['pos_idx']))
+            sos_embed = self.token_embedding(buffers['idx_buffer'][:, 0:1])
+            if not self.use_RoPE:
+                _pos_src = self.lpe_expansion_pos if self.lpe_expansion_pos is not None else self.pos_embedding
+                sos_embed = sos_embed + _pos_src(buffers['pos_idx'])
             if has_embed_adapter:
                 sos_embed = self.embedding_adapter[particle_type][0](sos_embed)
 
-            e_sos = (self.energy_embedding(buffers['e_buffer'][:, 0:1]) +
-                    self.energy_pos_embedding(buffers['pos_idx']))
+            e_sos = self.energy_embedding(buffers['e_buffer'][:, 0:1])
+            if not self.use_RoPE:
+                _e_pos_src = self.lpe_expansion_energy if self.lpe_expansion_energy is not None else self.energy_pos_embedding
+                e_sos = e_sos + _e_pos_src(buffers['pos_idx'])
             if has_embed_adapter:
                 e_sos = self.embedding_adapter[particle_type][1](e_sos)
 
@@ -1564,15 +1568,21 @@ class ECAL_GPT(nn.Module):
                     buffers['pos_idx'].fill_(step)
 
                     buffers['tok_embed'].copy_(self.token_embedding(buffers['idx_buffer'][:, step:step+1]).to(dtype))
-                    buffers['pos_embed'].copy_(self.pos_embedding(buffers['pos_idx']).to(dtype))
-                    buffers['x_t'].copy_(buffers['tok_embed'] + buffers['pos_embed'])
+                    if not self.use_RoPE:
+                        _pos_src = self.lpe_expansion_pos if self.lpe_expansion_pos is not None else self.pos_embedding
+                        buffers['x_t'].copy_(buffers['tok_embed'] + _pos_src(buffers['pos_idx']).to(dtype))
+                    else:
+                        buffers['x_t'].copy_(buffers['tok_embed'])
 
                     if has_embed_adapter:
                         buffers['x_t'].copy_(self.embedding_adapter[particle_type][0](buffers['x_t']))
 
                     buffers['e_embed'].copy_(self.energy_embedding(buffers['e_buffer'][:, step:step+1]).to(dtype))
-                    buffers['e_pos_embed'].copy_(self.energy_pos_embedding(buffers['pos_idx']).to(dtype))
-                    buffers['e_t'].copy_(buffers['e_embed'] + buffers['e_pos_embed'])
+                    if not self.use_RoPE:
+                        _e_pos_src = self.lpe_expansion_energy if self.lpe_expansion_energy is not None else self.energy_pos_embedding
+                        buffers['e_t'].copy_(buffers['e_embed'] + _e_pos_src(buffers['pos_idx']).to(dtype))
+                    else:
+                        buffers['e_t'].copy_(buffers['e_embed'])
 
                     if has_embed_adapter:
                         buffers['e_t'].copy_(self.embedding_adapter[particle_type][1](buffers['e_t']))
@@ -1590,12 +1600,18 @@ class ECAL_GPT(nn.Module):
             buffers['pos_idx'].fill_(capture_step)
 
             buffers['tok_embed'].copy_(self.token_embedding(buffers['idx_buffer'][:, capture_step:capture_step+1]).to(dtype))
-            buffers['pos_embed'].copy_(self.pos_embedding(buffers['pos_idx']).to(dtype))
-            buffers['x_t'].copy_(buffers['tok_embed'] + buffers['pos_embed'])
+            if not self.use_RoPE:
+                _pos_src = self.lpe_expansion_pos if self.lpe_expansion_pos is not None else self.pos_embedding
+                buffers['x_t'].copy_(buffers['tok_embed'] + _pos_src(buffers['pos_idx']).to(dtype))
+            else:
+                buffers['x_t'].copy_(buffers['tok_embed'])
 
             buffers['e_embed'].copy_(self.energy_embedding(buffers['e_buffer'][:, capture_step:capture_step+1]).to(dtype))
-            buffers['e_pos_embed'].copy_(self.energy_pos_embedding(buffers['pos_idx']).to(dtype))
-            buffers['e_t'].copy_(buffers['e_embed'] + buffers['e_pos_embed'])
+            if not self.use_RoPE:
+                _e_pos_src = self.lpe_expansion_energy if self.lpe_expansion_energy is not None else self.energy_pos_embedding
+                buffers['e_t'].copy_(buffers['e_embed'] + _e_pos_src(buffers['pos_idx']).to(dtype))
+            else:
+                buffers['e_t'].copy_(buffers['e_embed'])
 
         graph = torch.cuda.CUDAGraph()
         with torch.amp.autocast('cuda', dtype=dtype):
@@ -1612,15 +1628,21 @@ class ECAL_GPT(nn.Module):
                 buffers['pos_idx'].fill_(step)
 
                 buffers['tok_embed'].copy_(self.token_embedding(buffers['idx_buffer'][:, step:step+1]).to(dtype))
-                buffers['pos_embed'].copy_(self.pos_embedding(buffers['pos_idx']).to(dtype))
-                buffers['x_t'].copy_(buffers['tok_embed'] + buffers['pos_embed'])
+                if not self.use_RoPE:
+                    _pos_src = self.lpe_expansion_pos if self.lpe_expansion_pos is not None else self.pos_embedding
+                    buffers['x_t'].copy_(buffers['tok_embed'] + _pos_src(buffers['pos_idx']).to(dtype))
+                else:
+                    buffers['x_t'].copy_(buffers['tok_embed'])
 
                 if has_embed_adapter:
                     buffers['x_t'].copy_(self.embedding_adapter[particle_type][0](buffers['x_t']))
 
                 buffers['e_embed'].copy_(self.energy_embedding(buffers['e_buffer'][:, step:step+1]).to(dtype))
-                buffers['e_pos_embed'].copy_(self.energy_pos_embedding(buffers['pos_idx']).to(dtype))
-                buffers['e_t'].copy_(buffers['e_embed'] + buffers['e_pos_embed'])
+                if not self.use_RoPE:
+                    _e_pos_src = self.lpe_expansion_energy if self.lpe_expansion_energy is not None else self.energy_pos_embedding
+                    buffers['e_t'].copy_(buffers['e_embed'] + _e_pos_src(buffers['pos_idx']).to(dtype))
+                else:
+                    buffers['e_t'].copy_(buffers['e_embed'])
 
                 if has_embed_adapter:
                     buffers['e_t'].copy_(self.embedding_adapter[particle_type][1](buffers['e_t']))
