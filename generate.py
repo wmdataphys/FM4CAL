@@ -162,19 +162,19 @@ def main(config,args):
     #         print(f"Parameter {name} has value: {param.data.cpu().numpy()}")
 
     # (Optional) compile AFTER loading. If you stay on CPU, compiling may not help; feel free to skip.
-    try:
-        if use_kv_cache == True:
-            model = torch.compile(model, mode="reduce-overhead", dynamic=True)
-    except Exception as _:
-        # torch.compile may not be available / useful on this env; continue without it
-        print('Could not compile model. Continuing...')
-        pass
+    # try:
+    #     if use_kv_cache == True:
+    #         model = torch.compile(model, mode="reduce-overhead", dynamic=True)
+    # except Exception as _:
+    #     # torch.compile may not be available / useful on this env; continue without it
+    #     print('Could not compile model. Continuing...')
+    #     pass
 
     test_files = []
     for material in materials_to_generate:
         # e.g., material = "G4_W_gamma" -> config['dataset']['test']['G4_W_gamma_test_files']
         # e.g., material = "G4_W_electron" -> config['dataset']['test']['G4_W_electron_test_files']
-        test_files += read_text(config['dataset']['testing'][material + '_test_files'])
+        test_files += read_text(config['dataset']['testing'][material + '_test_files'])[:4]
         if "e-" in material:
             particle_type = "e-"
         elif "gamma" in material:
@@ -231,25 +231,39 @@ def main(config,args):
         with torch.inference_mode():
             if args.use_amp:
                 with autocast(dtype=torch.float16):     
-                    generated_indices, generated_energies = model.generate(
+                    # generated_indices, generated_energies = model.generate(
+                    #     initial_energy=initial_energy,
+                    #     material_index=material_index,
+                    #     method=args.sampling_method,
+                    #     dynamic_temp=args.dynamic_temp,
+                    #     max_seq_len=gen_seq_len,
+                    #     temperature=args.temperature,
+                    #     use_kv_cache=args.use_kv_cache,particle_type=particle_type    
+                    # )
+                    generated_indices, generated_energies = model.generate_with_cuda_graph(
                         initial_energy=initial_energy,
                         material_index=material_index,
-                        method=args.sampling_method,
-                        dynamic_temp=args.dynamic_temp,
                         max_seq_len=gen_seq_len,
                         temperature=args.temperature,
-                        use_kv_cache=args.use_kv_cache,particle_type=particle_type    
-                    )
+                        particle_type=particle_type,
+                        dynamic_temp=args.dynamic_temp)
             else:
-                generated_indices, generated_energies = model.generate(
+                # generated_indices, generated_energies = model.generate(
+                #     initial_energy=initial_energy,
+                #     material_index=material_index,
+                #     method=args.sampling_method,
+                #     dynamic_temp=args.dynamic_temp,
+                #     max_seq_len=gen_seq_len,
+                #     temperature=args.temperature,
+                #     use_kv_cache=args.use_kv_cache,particle_type=particle_type
+                # )
+                generated_indices, generated_energies = model.generate_with_cuda_graph(
                     initial_energy=initial_energy,
                     material_index=material_index,
-                    method=args.sampling_method,
-                    dynamic_temp=args.dynamic_temp,
                     max_seq_len=gen_seq_len,
                     temperature=args.temperature,
-                    use_kv_cache=args.use_kv_cache,particle_type=particle_type
-                )
+                    particle_type=particle_type,
+                    dynamic_temp=args.dynamic_temp)
 
             generated_indices = generated_indices.detach().cpu().numpy()
             generated_energies = generated_energies.detach().cpu().numpy()

@@ -28,7 +28,7 @@ class Router(nn.Module):
         # We enforce the load to be balanced
         self.k = num_experts // num_classes # experts per class 
         targets = [i for i in range(num_classes) for _ in range(num_experts // num_classes)]
-        self.register_buffer('expert_index', torch.tensor(targets, dtype=torch.long))
+        self.expert_index = torch.tensor(targets,dtype=torch.long).to(self.device)# (num_experts,)
         self.router = nn.Linear(embed_dim,num_experts)
 
     def mask_old_expert_grads(self,grad):

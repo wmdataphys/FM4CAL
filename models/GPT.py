@@ -197,8 +197,6 @@ class CATransformerBlock(nn.Module):
         self.c_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.LN2 = nn.LayerNorm(self.embed_dim)
 
-        self.register_buffer('_load_balance_placeholder', torch.tensor([0.0], dtype=torch.float32))
-
         if self.use_MoE:
             self.num_experts = num_experts
             self.num_classes = num_classes
@@ -223,7 +221,7 @@ class CATransformerBlock(nn.Module):
 
         x_norm = self.xN(x)
         e_norm = self.eN(e_embed)
-        load_balance = self._load_balance_placeholder.squeeze()  # scalar, device-safe
+        load_balance = 0.0#torch.tensor([0.0], dtype=torch.float32, device=self.device)  # place holder
 
         need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
         mask_ = self.generate_mask(N_t) if need_causal else None
@@ -394,8 +392,6 @@ class TransformerBlock(nn.Module):
         self.c_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
         self.LN2 = nn.LayerNorm(self.embed_dim)
 
-        self.register_buffer('_load_balance_placeholder', torch.tensor([0.0], dtype=torch.float32))
-
         if self.use_MoE:
             self.num_experts = num_experts
             self.num_classes = num_classes
@@ -419,7 +415,7 @@ class TransformerBlock(nn.Module):
                 LoRA_module=None):
         B, N_t, t_dim = x.shape
         x_norm = self.LN1(x)
-        load_balance = self._load_balance_placeholder.squeeze()  # scalar, device-safe
+        load_balance = 0.0#torch.tensor(0.0, dtype=torch.float32, device=self.device)  # place holder
 
         need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
         mask_ = self.generate_mask(N_t) if need_causal else None
@@ -1085,7 +1081,8 @@ class ECAL_GPT(nn.Module):
     @torch.inference_mode()
     def generate(self, initial_energy, material_index, max_seq_len=2100,
                 context_len=None, temperature: float = 1.0, method="Default",
-                topK=100, nucleus_p=0.95, dynamic_temp=False, use_kv_cache=True,particle_type="gamma",compiled_decode=False):
+                topK=100, nucleus_p=0.95, dynamic_temp=False, use_kv_cache=True,
+                particle_type="gamma",compiled_decode=False):
 
         lora_modules = self._get_lora_modules_for_particle(particle_type)
 
@@ -1124,10 +1121,6 @@ class ECAL_GPT(nn.Module):
         newly_done_buffer = torch.zeros(B, dtype=torch.bool, device=device)
         pad_mask_buffer = torch.zeros(B, dtype=torch.bool, device=device)
         eos_mask_buffer = torch.zeros(B, dtype=torch.bool, device=device)
-
-        # Gumbel noise buffers (if using gumbel sampling)
-        gumbel_pixel_buffer = torch.zeros((B, self.space_vocab), device=device, dtype=torch.float32)
-        gumbel_energy_buffer = torch.zeros((B, self.energy_vocab), device=device, dtype=torch.float32)
 
         if use_amp:
             autocast_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype)
@@ -1270,31 +1263,29 @@ class ECAL_GPT(nn.Module):
 
                 # Sample tokens
                 if method == "Default":
-                    idx_next = self.gumbel_sample(pixel_logits, temperature, noise_buffer=gumbel_pixel_buffer)
+                    probs = F.softmax(pixel_logits, dim=-1)
+                    idx_next = torch.multinomial(probs, num_samples=1)
+                elif method == "TopK":
+                    idx_next = self.__topK(pixel_logits, topK)
+                elif method == "Nucleus":
+                    idx_next = self.__nucleus(pixel_logits, nucleus_p)
                 elif method == "Greedy":
-                    torch.argmax(pixel_logits, dim=1, keepdim=True, out=idx_next_buffer)
-                    idx_next = idx_next_buffer
-                else:
-                    if method == "TopK":
-                        idx_next = self.__topK(pixel_logits, topK)
-                    elif method == "Nucleus":
-                        idx_next = self.__nucleus(pixel_logits, nucleus_p)
-                    elif method == "Min_p":
-                        idx_next = self.__min_p(pixel_logits)
+                    idx_next = torch.argmax(pixel_logits, dim=-1, keepdim=True)
+                elif method == "Min_p":
+                    idx_next = self.__min_p(pixel_logits)
 
                 if self.digitize_energy:
+                    probs_t = F.softmax(energy_logits, dim=-1, dtype=torch.float32)
                     if method == "Default":
-                        e_next = self.gumbel_sample(energy_logits, temperature, noise_buffer=gumbel_energy_buffer)
+                        e_next = torch.multinomial(probs_t, num_samples=1)
+                    elif method == "TopK":
+                        e_next = self.__topK(energy_logits, topK)
+                    elif method == "Nucleus":
+                        e_next = self.__nucleus(energy_logits, nucleus_p)
                     elif method == "Greedy":
-                        torch.argmax(energy_logits, dim=-1, keepdim=True, out=e_next_buffer)
-                        e_next = e_next_buffer
+                        e_next = torch.argmax(energy_logits, dim=-1, keepdim=True)
                     else:
-                        if method == "TopK":
-                            e_next = self.__topK(energy_logits, topK)
-                        elif method == "Nucleus":
-                            e_next = self.__nucleus(energy_logits, nucleus_p)
-                        else:
-                            e_next = self.__min_p(energy_logits)
+                        e_next = self.__min_p(energy_logits)
                 else:
                     e_next = energy_val.unsqueeze(1)
 
@@ -1412,14 +1403,16 @@ class ECAL_GPT(nn.Module):
                     x, e, material_index,
                     padding_mask=None,
                     past_kv=cache,
-                    LoRA_module=lora_mod
+                    LoRA_module=lora_mod,
+                    rope=self.rope
                 )
             else:
                 x, _, _lb = layer(
                     x, material_index,
                     padding_mask=None,
                     past_kv=cache,
-                    LoRA_module=lora_mod
+                    LoRA_module=lora_mod,
+                    rope=self.rope
                 )
 
         x = self.LN(x)
@@ -1428,26 +1421,15 @@ class ECAL_GPT(nn.Module):
         buffers['h_out'].copy_(x[:, -1:, :])
 
         # Compute logits in place
-        h_last = buffers['h_out'].squeeze(1)
-
-        delta_pixel = self.vocab_LoRA[particle_type][0](buffers['h_out']).squeeze(1) \
-            if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
-        buffers['pixel_logits'].copy_(self.logits_head(h_last) + delta_pixel)
+        h_last = buffers['h_out']
 
         if hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA:
-            buffers['pixel_logits'].copy_(
-                self.vocab_LoRA[particle_type][0].apply_product(buffers['pixel_logits'])
-            )
+            buffers['pixel_logits'].copy_(self.vocab_LoRA[particle_type][0](h_last).squeeze(1))
+            buffers['energy_logits'].copy_(self.vocab_LoRA[particle_type][1](h_last).squeeze(1))
+        else:
+            buffers['pixel_logits'].copy_(self.logits_head(h_last).squeeze(1))
+            buffers['energy_logits'].copy_(self.energy_head(h_last).squeeze(1))
 
-        if self.digitize_energy:
-            delta_e = self.vocab_LoRA[particle_type][1](buffers['h_out']).squeeze(1) \
-                if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else 0.0
-            buffers['energy_logits'].copy_(self.energy_head(h_last) + delta_e)
-
-            if hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA:
-                buffers['energy_logits'].copy_(
-                    self.vocab_LoRA[particle_type][1].apply_product(buffers['energy_logits'])
-                )
 
     def gumbel_sample(self, logits, temperature=1.0, noise_buffer=None):
         """
@@ -1480,11 +1462,13 @@ class ECAL_GPT(nn.Module):
         material_index,
         max_seq_len=2100,
         temperature: float = 1.0,
-        particle_type="gamma"
+        particle_type="gamma",
+        dynamic_temp=False,
     ):
         """
         Generation using CUDA graphs for maximum inference speed.
         """
+
         lora_modules = self._get_lora_modules_for_particle(particle_type)
 
         device = self.device
@@ -1539,17 +1523,19 @@ class ECAL_GPT(nn.Module):
 
                 if isinstance(layer, CATransformerBlock):
                     x_first, _, _ = layer(x_first, e_first, material_index,
-                                        padding_mask=None, past_kv=cache, LoRA_module=lora_mod)
+                                        padding_mask=None, past_kv=cache, LoRA_module=lora_mod,rope=self.rope)
                 else:
                     x_first, _, _ = layer(x_first, material_index,
-                                        padding_mask=None, past_kv=cache, LoRA_module=lora_mod)
+                                        padding_mask=None, past_kv=cache, LoRA_module=lora_mod,rope=self.rope)
 
             x_first = self.LN(x_first)
             h_last = x_first[:, -1, :]
 
             # Get first token
-            pixel_logits = self.logits_head(h_last) / temperature
-            energy_logits = self.energy_head(h_last) / temperature
+            energy_logits = self.vocab_LoRA[particle_type][1](h_last) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.energy_head(h_last)
+            pixel_logits = self.vocab_LoRA[particle_type][0](h_last) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.logits_head(h_last)
+            pixel_logits = pixel_logits / temperature
+            energy_logits = energy_logits / temperature
 
             idx_next = torch.multinomial(F.softmax(pixel_logits, dim=-1), num_samples=1)
             e_next = torch.multinomial(F.softmax(energy_logits, dim=-1), num_samples=1)
@@ -1613,6 +1599,9 @@ class ECAL_GPT(nn.Module):
             else:
                 buffers['e_t'].copy_(buffers['e_embed'])
 
+            for cache in kv_caches:
+                cache['seq_len'] = capture_step + 1
+
         graph = torch.cuda.CUDAGraph()
         with torch.amp.autocast('cuda', dtype=dtype):
             with torch.cuda.graph(graph):
@@ -1620,9 +1609,15 @@ class ECAL_GPT(nn.Module):
                     buffers, kv_caches, capture_step + 1, material_index, particle_type, lora_modules
                 )
 
+        print("CUDA graph captured - starting main generation loop")
+
         # ============ MAIN GENERATION LOOP ============
         with torch.amp.autocast('cuda', dtype=dtype):
             for step in range(1, max_seq_len):
+                # Adjust temperature if dynamic
+                if dynamic_temp:
+                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
+
                 seq_len_for_cache = step + 1
 
                 buffers['pos_idx'].fill_(step)
