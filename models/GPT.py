@@ -127,19 +127,27 @@ class CrossAttention(nn.Module):
             cache_k = past_kv['k']
             cache_v = past_kv['v']
             curr_len = past_kv['seq_len']
-            
-            # Write new K,V into pre-allocated cache
-            cache_k[:, :, curr_len:curr_len+seq_len] = k
-            cache_v[:, :, curr_len:curr_len+seq_len] = v
-            
-            # Update sequence length
-            new_len = curr_len + seq_len
-            
-            # Use cache up to current position
-            k = cache_k[:, :, :new_len]
-            v = cache_v[:, :, :new_len]
-            
-            # Update cache dict for return
+
+            if T_new == 1 and isinstance(curr_len, torch.Tensor):
+                # CUDA graph safe path: scatter for write, full buffer + mask for read
+                write_idx = curr_len.long().view(1, 1, 1, 1).expand(
+                    batch_size, self.num_heads, 1, self.head_dim)
+                cache_k.scatter_(2, write_idx, k)
+                cache_v.scatter_(2, write_idx, v)
+
+                new_len = curr_len + 1
+
+                # Use full buffer — unused positions masked in attention scores below
+                k = cache_k
+                v = cache_v
+            else:
+                # Prefill / training path (not in CUDA graph)
+                cache_k[:, :, curr_len:curr_len+T_new] = k
+                cache_v[:, :, curr_len:curr_len+T_new] = v
+                new_len = curr_len + T_new
+                k = cache_k[:, :, :new_len]
+                v = cache_v[:, :, :new_len]
+
             updated_cache = {
                 'k': cache_k,
                 'v': cache_v,
@@ -160,6 +168,10 @@ class CrossAttention(nn.Module):
         if key_padding_mask is not None:
             key_padding_mask = key_padding_mask[:, None, None, :]
             attn_scores.masked_fill_(key_padding_mask, -torch.inf)
+
+        if past_kv is not None and T_new == 1 and 'positions' in past_kv:
+            kv_mask = (past_kv['positions'] >= new_len).view(1, 1, 1, -1)
+            attn_scores.masked_fill_(kv_mask, -torch.inf)
 
         attn_scores = F.softmax(attn_scores, dim=-1)
         attn_scores = self.dropout(attn_scores)
@@ -223,9 +235,17 @@ class CATransformerBlock(nn.Module):
         e_norm = self.eN(e_embed)
         load_balance = 0.0#torch.tensor([0.0], dtype=torch.float32, device=self.device)  # place holder
 
-        need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
+        if past_kv is None:
+            need_causal = True
+        elif N_t == 1:
+            need_causal = False  # single-token decode step, never needs causal mask
+        else:
+            # past_kv exists and N_t > 1 (prefill into cache)
+            seq_len_val = past_kv["seq_len"]
+            if isinstance(seq_len_val, torch.Tensor):
+                seq_len_val = seq_len_val.item()  # only happens outside graph capture
+            need_causal = (seq_len_val == 0)
         mask_ = self.generate_mask(N_t) if need_causal else None
-
 
         attn_out, kv_ca = self.attn(x_norm,
                                     e_norm,
@@ -331,19 +351,27 @@ class MHSA(nn.Module):
             cache_k = past_kv['k']
             cache_v = past_kv['v']
             curr_len = past_kv['seq_len']
-            
-            # Write new K,V into pre-allocated cache
-            cache_k[:, :, curr_len:curr_len+T_new] = k
-            cache_v[:, :, curr_len:curr_len+T_new] = v
-            
-            # Update sequence length
-            new_len = curr_len + T_new
-            
-            # Use cache up to current position
-            k = cache_k[:, :, :new_len]
-            v = cache_v[:, :, :new_len]
-            
-            # Update cache dict for return
+
+            if T_new == 1 and isinstance(curr_len, torch.Tensor):
+                # CUDA graph safe path: scatter for write, full buffer + mask for read
+                write_idx = curr_len.long().view(1, 1, 1, 1).expand(
+                    batch_size, self.num_heads, 1, self.head_dim)
+                cache_k.scatter_(2, write_idx, k)
+                cache_v.scatter_(2, write_idx, v)
+
+                new_len = curr_len + 1
+
+                # Use full buffer — unused positions masked in attention scores below
+                k = cache_k
+                v = cache_v
+            else:
+                # Prefill / training path (not in CUDA graph)
+                cache_k[:, :, curr_len:curr_len+T_new] = k
+                cache_v[:, :, curr_len:curr_len+T_new] = v
+                new_len = curr_len + T_new
+                k = cache_k[:, :, :new_len]
+                v = cache_v[:, :, :new_len]
+
             updated_cache = {
                 'k': cache_k,
                 'v': cache_v,
@@ -364,6 +392,11 @@ class MHSA(nn.Module):
         if key_padding_mask is not None:
             key_padding_mask = key_padding_mask[:, None, None, :]
             attn_scores.masked_fill_(key_padding_mask, -torch.inf)
+
+        # Mask any KV positions that are outside the current sequence length (possible when using pre-allocated cache)
+        if past_kv is not None and T_new == 1 and 'positions' in past_kv:
+            kv_mask = (past_kv['positions'] >= new_len).view(1, 1, 1, -1)
+            attn_scores.masked_fill_(kv_mask, -torch.inf)
 
         attn_scores = F.softmax(attn_scores, dim=-1)
         attn_scores = self.dropout(attn_scores)
@@ -417,7 +450,16 @@ class TransformerBlock(nn.Module):
         x_norm = self.LN1(x)
         load_balance = 0.0#torch.tensor(0.0, dtype=torch.float32, device=self.device)  # place holder
 
-        need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
+        if past_kv is None:
+            need_causal = True
+        elif N_t == 1:
+            need_causal = False  # single-token decode step, never needs causal mask
+        else:
+            # past_kv exists and N_t > 1 (prefill into cache)
+            seq_len_val = past_kv["seq_len"]
+            if isinstance(seq_len_val, torch.Tensor):
+                seq_len_val = seq_len_val.item()  # only happens outside graph capture
+            need_causal = (seq_len_val == 0)
         mask_ = self.generate_mask(N_t) if need_causal else None
 
         attn_out, kv_mhsa = self.attn(
@@ -727,7 +769,8 @@ class ECAL_GPT(nn.Module):
             cache_list.append({
                 'k': cache_k,
                 'v': cache_v,
-                'seq_len': 0  # Tracks how many tokens are cached
+                'seq_len': torch.tensor(0, dtype=torch.long, device=device),
+                'positions': torch.arange(max_len, dtype=torch.long, device=device)
             })
         
         return cache_list
@@ -1395,8 +1438,6 @@ class ECAL_GPT(nn.Module):
             lora_modules = [None] * len(self.layers)
 
         for i, (layer, cache, lora_mod) in enumerate(zip(self.layers, kv_caches, lora_modules)):
-            # Update cache seq_len before forward pass
-            cache['seq_len'] = seq_len
 
             if isinstance(layer, CATransformerBlock):
                 x, _, _lb = layer(
@@ -1485,6 +1526,10 @@ class ECAL_GPT(nn.Module):
         # Pre-compute initial energy embedding (used every step for CA)
         init_e_embed = self.initial_energy_embedding(initial_energy).unsqueeze(1).to(dtype)
 
+        # Precompute RoPE frequencies for all positions (CUDA-graph-safe)
+        if self.rope is not None:
+            self.rope.precompute_freqs(max_seq_len + 2, device=device, dtype=dtype)
+
         is_done = torch.zeros(B, dtype=torch.bool, device=device)
 
         has_embed_adapter = hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter
@@ -1518,7 +1563,7 @@ class ECAL_GPT(nn.Module):
 
             # Run first step without graph (shape is [B, 2, E])
             for i, (layer, cache) in enumerate(zip(self.layers, kv_caches)):
-                cache['seq_len'] = 0
+                cache['seq_len'].fill_(0)  # Will be updated in graph steps
                 lora_mod = lora_modules[i] if lora_modules else None
 
                 if isinstance(layer, CATransformerBlock):
@@ -1528,6 +1573,8 @@ class ECAL_GPT(nn.Module):
                     x_first, _, _ = layer(x_first, material_index,
                                         padding_mask=None, past_kv=cache, LoRA_module=lora_mod,rope=self.rope)
 
+            for cache in kv_caches:
+                    cache['seq_len'].fill_(2)  # first step wrote 2 tokens: init_e + sos
             x_first = self.LN(x_first)
             h_last = x_first[:, -1, :]
 
@@ -1558,7 +1605,7 @@ class ECAL_GPT(nn.Module):
                         _pos_src = self.lpe_expansion_pos if self.lpe_expansion_pos is not None else self.pos_embedding
                         buffers['x_t'].copy_(buffers['tok_embed'] + _pos_src(buffers['pos_idx']).to(dtype))
                     else:
-                        buffers['x_t'].copy_(buffers['tok_embed'])
+                        buffers['x_t'].copy_(buffers['tok_embed'], non_blocking=True)
 
                     if has_embed_adapter:
                         buffers['x_t'].copy_(self.embedding_adapter[particle_type][0](buffers['x_t']))
@@ -1568,10 +1615,13 @@ class ECAL_GPT(nn.Module):
                         _e_pos_src = self.lpe_expansion_energy if self.lpe_expansion_energy is not None else self.energy_pos_embedding
                         buffers['e_t'].copy_(buffers['e_embed'] + _e_pos_src(buffers['pos_idx']).to(dtype))
                     else:
-                        buffers['e_t'].copy_(buffers['e_embed'])
+                        buffers['e_t'].copy_(buffers['e_embed'], non_blocking=True)
 
                     if has_embed_adapter:
                         buffers['e_t'].copy_(self.embedding_adapter[particle_type][1](buffers['e_t']))
+
+                    for cache in kv_caches:
+                        cache['seq_len'].fill_(seq_len_for_cache)
 
                     self.forward_decode_step_static(
                         buffers, kv_caches, seq_len_for_cache, material_index, particle_type, lora_modules=lora_modules
@@ -1600,16 +1650,16 @@ class ECAL_GPT(nn.Module):
                 buffers['e_t'].copy_(buffers['e_embed'])
 
             for cache in kv_caches:
-                cache['seq_len'] = capture_step + 1
+                cache['seq_len'].fill_(capture_step + 1)
 
         graph = torch.cuda.CUDAGraph()
         with torch.amp.autocast('cuda', dtype=dtype):
             with torch.cuda.graph(graph):
                 self.forward_decode_step_static(
                     buffers, kv_caches, capture_step + 1, material_index, particle_type, lora_modules
-                )
+                ) 
 
-        print("CUDA graph captured - starting main generation loop")
+        # print("CUDA graph captured - starting main generation loop")
 
         # ============ MAIN GENERATION LOOP ============
         with torch.amp.autocast('cuda', dtype=dtype):
@@ -1644,7 +1694,7 @@ class ECAL_GPT(nn.Module):
 
                 # Update cache seq_len for all layers
                 for cache in kv_caches:
-                    cache['seq_len'] = seq_len_for_cache
+                    cache['seq_len'].fill_(seq_len_for_cache)
 
                 # Replay the captured graph
                 graph.replay()
@@ -1679,5 +1729,9 @@ class ECAL_GPT(nn.Module):
                     if torch.all(is_done):
                         return (buffers['idx_buffer'][:, :step+2].clone(),
                                 buffers['e_buffer'][:, :step+2].clone())
+
+        if self.rope is not None:
+            self.rope._precomputed_cos = None
+            self.rope._precomputed_sin = None
 
         return buffers['idx_buffer'].clone(), buffers['e_buffer'].clone()
