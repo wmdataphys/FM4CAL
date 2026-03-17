@@ -29,12 +29,12 @@
       "G4_Ta_e-_val_files": "data/Ta_Electron_Files_val.txt"
     },
     "testing": {
-      "G4_Pb_gamma_test_files": "data/1MillSim/Pb_Files_test.txt",
-      "G4_W_gamma_test_files": "data/1MillSim/W_Files_test.txt",
-      "G4_Ta_gamma_test_files": "data/1MillSim/Ta_Files_test.txt",
-      "G4_Pb_e-_test_files": "data/1MillSim/Pb_Electron_Files_test.txt",
-      "G4_W_e-_test_files": "data/1MillSim/W_Electron_Files_test.txt",
-      "G4_Ta_e-_test_files": "data/1MillSim/Ta_Electron_Files_test.txt"
+      "G4_Pb_gamma_test_files": "data/Pb_Files_test.txt",
+      "G4_W_gamma_test_files": "data/W_Files_test.txt",
+      "G4_Ta_gamma_test_files": "data/Ta_Files_test.txt",
+      "G4_Pb_e-_test_files": "data/Pb_Electron_Files_test.txt",
+      "G4_W_e-_test_files": "data/W_Electron_Files_test.txt",
+      "G4_Ta_e-_test_files": "data/Ta_Electron_Files_test.txt"
     },
     "in_memory": "in_memory"
   },
@@ -112,7 +112,7 @@
         }
   },
   "Inference": {
-    "model_path": "Trained_Models/Pb_Electron_128Rank___Mar-10-2026/Epoch10_loss_0.000000.pth",
+    "model_path": "Trained_Models/pretrained.pth",
     "output_file": "my_generations.h5",
     "full_fine_tune_path": "Generations/my_generations.h5",
     "batch_size": 1200,

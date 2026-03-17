@@ -21,6 +21,7 @@ We demonstrate that next-token calorimeter models are computationally competitiv
 8. [K-Fold Studies](#k-fold-studies)
 9. [Environment](#environment)
 10. [Dataset](#dataset)
+11. Pre-trained Weights(#weights)
 
 ---
 
@@ -240,3 +241,26 @@ python3 -m pip install <package>
 # Dataset
 
 Datasets can be reproduced following the instructions at [github.com/FLC-QU-hep/getting_high](https://github.com/FLC-QU-hep/getting_high). Additional information on detector material modifications is available upon request.
+
+# Pre-trained Weights
+
+Download the pre-trained foundation model weights:
+
+```bash
+# Download from Google Drive
+wget "https://drive.google.com/uc?export=download&id=1yCICuNOSbc8MN_c5N61zdswTEUGF9uSX" -O foundation_model.pth
+
+# Or using curl
+curl -L "https://drive.google.com/uc?export=download&id=1yCICuNOSbc8MN_c5N61zdswTEUGF9uSX" -o foundation_model.pth
+```
+
+Place the downloaded `pretrained.pth` file in your `Trained_Models` directory, then reference it in your config:
+
+```json
+{
+    "model_path": "./foundation_model.pth",
+    ...
+}
+```
+
+**Note:** The first time you download, Google Drive may prompt with a virus scan warning. If you get a "quota exceeded" error, try again later or download manually from the [Google Drive link](https://drive.google.com/file/d/1yCICuNOSbc8MN_c5N61zdswTEUGF9uSX/view?usp=sharing).
