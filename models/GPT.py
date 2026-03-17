@@ -184,6 +184,145 @@ class CrossAttention(nn.Module):
         else:
             return (attn_output, updated_cache)
 
+# class CrossAttention(nn.Module):
+#     def __init__(self,
+#                  embed_dim,
+#                  num_heads,
+#                  seq_len=27002,
+#                  dropout=0.2,
+#                  device="cuda",
+#                  qk_norm=False):
+#         super().__init__()
+
+#         assert embed_dim % num_heads == 0, "embed_dim is indivisible by num_heads"
+
+#         self.num_heads = num_heads
+#         self.seq_len = seq_len
+#         self.head_dim = embed_dim // num_heads
+#         self.d_k = self.head_dim ** -0.5
+#         self.device = device
+#         self.qk_norm = qk_norm
+#         print(f"Cross-Attention QK Normalization: {self.qk_norm}")
+#         if self.qk_norm:
+#             self.g_scale = nn.Parameter(torch.tensor(1.0 / self.d_k, dtype=torch.float, device=self.device), requires_grad=True)
+#         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+#         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+#         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+#         self.dropout = nn.Dropout(dropout)
+
+#     def forward(self, x, e_embed, attn_mask=None, key_padding_mask=None,
+#                 need_weights=False, past_kv=None, rope=None, LoRA_module=None):
+#         batch_size, seq_len, embed_dim = x.shape
+
+#         q, k, v = self.q_proj(e_embed), self.k_proj(x), self.v_proj(x)
+
+#         if LoRA_module is not None:
+#             delta_Q, delta_K, delta_V = LoRA_module(x, e_embed=e_embed)
+#             q = q + delta_Q
+#             k = k + delta_K
+#             v = v + delta_V
+
+#         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+#         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+#         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+#         if rope is not None:
+#             T_new = q.shape[2]
+#             if T_new > 1:
+#                 q_global, k_global = q[:, :, :1, :], k[:, :, :1, :]
+#                 q_hits, k_hits = q[:, :, 1:, :], k[:, :, 1:, :]
+#                 q_hits, k_hits = rope(q_hits, k_hits, offset=1)
+#                 q = torch.cat([q_global, q_hits], dim=2)
+#                 k = torch.cat([k_global, k_hits], dim=2)
+#             else:
+#                 T_new = q.shape[2]
+#                 offset = past_kv.get('rope_offset', past_kv['seq_len'])
+#                 q, k = rope(q, k, offset=offset)
+
+#         if self.qk_norm:
+#             k = F.normalize(k, p=2, dim=-1)
+#             q = F.normalize(q, p=2, dim=-1)
+
+#         # Handle KV cache
+#         if past_kv is not None:
+#             cache_k = past_kv['k']
+#             cache_v = past_kv['v']
+#             curr_len = past_kv['seq_len']
+
+#             if T_new == 1 and isinstance(curr_len, torch.Tensor):
+#                 write_idx = curr_len.long().view(1, 1, 1, 1).expand(
+#                     batch_size, self.num_heads, 1, self.head_dim)
+#                 cache_k.scatter_(2, write_idx, k)
+#                 cache_v.scatter_(2, write_idx, v)
+#                 new_len = curr_len + 1
+#                 k = cache_k
+#                 v = cache_v
+#             else:
+#                 cache_k[:, :, curr_len:curr_len+T_new] = k
+#                 cache_v[:, :, curr_len:curr_len+T_new] = v
+#                 new_len = curr_len + T_new
+#                 k = cache_k[:, :, :new_len]
+#                 v = cache_v[:, :, :new_len]
+
+#             updated_cache = {'k': cache_k, 'v': cache_v, 'seq_len': new_len}
+#         else:
+#             updated_cache = None
+#             new_len = None
+
+#         # Build unified additive mask
+#         combined_mask = None
+
+#         if attn_mask is not None:
+#             combined_mask = torch.zeros(
+#                 batch_size, self.num_heads, T_new, attn_mask.shape[-1],
+#                 dtype=q.dtype, device=q.device
+#             )
+#             combined_mask.masked_fill_(attn_mask, float('-inf'))
+
+#         if key_padding_mask is not None:
+#             kv_pad = torch.zeros(
+#                 batch_size, 1, 1, key_padding_mask.shape[-1],
+#                 dtype=q.dtype, device=q.device
+#             )
+#             kv_pad.masked_fill_(key_padding_mask[:, None, None, :], float('-inf'))
+#             combined_mask = kv_pad if combined_mask is None else combined_mask + kv_pad
+
+#         if past_kv is not None and T_new == 1 and 'positions' in past_kv:
+#             T_kv = k.shape[2]
+#             kv_pos_mask = torch.zeros(
+#                 1, 1, 1, T_kv,
+#                 dtype=q.dtype, device=q.device
+#             )
+#             pos_invalid = (past_kv['positions'] >= new_len).view(1, 1, 1, -1)
+#             kv_pos_mask.masked_fill_(pos_invalid, float('-inf'))
+#             combined_mask = kv_pos_mask if combined_mask is None else combined_mask + kv_pos_mask
+
+#         if need_weights:
+#             if self.qk_norm:
+#                 attn_scores = self.g_scale * q @ k.transpose(2, 3)
+#             else:
+#                 attn_scores = self.d_k * q @ k.transpose(2, 3)
+#             if combined_mask is not None:
+#                 attn_scores = attn_scores + combined_mask
+#             attn_scores = F.softmax(attn_scores, dim=-1)
+#             attn_scores = self.dropout(attn_scores)
+#             attn_output = (attn_scores @ v).transpose(1, 2).contiguous().view(batch_size, seq_len, embed_dim)
+#             return attn_output, attn_scores
+
+#         if self.qk_norm:
+#             q = q * self.g_scale
+#             attn_output = sdpa(q, k, v,
+#                                attn_mask=combined_mask,
+#                                dropout_p=self.dropout.p if self.training else 0.0,
+#                                scale=1.0)
+#         else:
+#             attn_output = sdpa(q, k, v,
+#                                attn_mask=combined_mask,
+#                                dropout_p=self.dropout.p if self.training else 0.0,
+#                                scale=self.d_k)
+
+#         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, embed_dim)
+#         return attn_output, updated_cache
 
 class CATransformerBlock(nn.Module):
     def __init__(self,
@@ -409,6 +548,146 @@ class MHSA(nn.Module):
         else:
             return (attn_output, updated_cache)
 
+# class MHSA(nn.Module):
+#     def __init__(self, embed_dim, num_heads, seq_len=250, dropout=0.2, device='cuda', qk_norm=False):
+#         super().__init__()
+
+#         assert embed_dim % num_heads == 0, "embed_dim is indivisible by num_heads"
+
+#         self.num_heads = num_heads
+#         self.seq_length = seq_len
+#         self.head_dim = embed_dim // num_heads
+#         self.d_k = self.head_dim ** -0.5
+#         self.device = device
+#         self.qk_norm = qk_norm
+#         print(f"MHSA QK Normalization: {self.qk_norm}")
+#         if self.qk_norm:
+#             self.g_scale = nn.Parameter(torch.tensor(1.0 / self.d_k, dtype=torch.float, device=self.device), requires_grad=True)
+#         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+#         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+#         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+#         self.dropout = nn.Dropout(dropout)
+
+#     def forward(self, x, attn_mask=None, key_padding_mask=None,
+#                 need_weights=False, past_kv=None, rope=None, LoRA_module=None):
+#         batch_size, T_new, embed_dim = x.shape
+
+#         q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+
+#         if LoRA_module is not None:
+#             delta_Q, delta_K, delta_V = LoRA_module(x)
+#             q = q + delta_Q
+#             k = k + delta_K
+#             v = v + delta_V
+
+#         k = k.view(batch_size, T_new, self.num_heads, self.head_dim).transpose(1, 2)
+#         q = q.view(batch_size, T_new, self.num_heads, self.head_dim).transpose(1, 2)
+#         v = v.view(batch_size, T_new, self.num_heads, self.head_dim).transpose(1, 2)
+
+#         if rope is not None:
+#             T_new = q.shape[2]
+#             if T_new > 1:
+#                 q_global, k_global = q[:, :, :1, :], k[:, :, :1, :]
+#                 q_hits, k_hits = q[:, :, 1:, :], k[:, :, 1:, :]
+#                 q_hits, k_hits = rope(q_hits, k_hits, offset=1)
+#                 q = torch.cat([q_global, q_hits], dim=2)
+#                 k = torch.cat([k_global, k_hits], dim=2)
+#             else:
+#                 offset = past_kv.get('rope_offset', past_kv['seq_len'])
+#                 q, k = rope(q, k, offset=offset)
+
+#         if self.qk_norm:
+#             k = F.normalize(k, p=2, dim=-1)
+#             q = F.normalize(q, p=2, dim=-1)
+
+#         # Handle KV cache
+#         if past_kv is not None:
+#             cache_k = past_kv['k']
+#             cache_v = past_kv['v']
+#             curr_len = past_kv['seq_len']
+
+#             if T_new == 1 and isinstance(curr_len, torch.Tensor):
+#                 write_idx = curr_len.long().view(1, 1, 1, 1).expand(
+#                     batch_size, self.num_heads, 1, self.head_dim)
+#                 cache_k.scatter_(2, write_idx, k)
+#                 cache_v.scatter_(2, write_idx, v)
+#                 new_len = curr_len + 1
+#                 k = cache_k
+#                 v = cache_v
+#             else:
+#                 cache_k[:, :, curr_len:curr_len+T_new] = k
+#                 cache_v[:, :, curr_len:curr_len+T_new] = v
+#                 new_len = curr_len + T_new
+#                 k = cache_k[:, :, :new_len]
+#                 v = cache_v[:, :, :new_len]
+
+#             updated_cache = {'k': cache_k, 'v': cache_v, 'seq_len': new_len}
+#         else:
+#             updated_cache = None
+#             new_len = None
+
+#         # Build unified additive mask for sdpa [B, H, T_new, T_kv]
+#         # sdpa expects 0.0 for attend, -inf for mask
+#         combined_mask = None
+
+#         if attn_mask is not None:
+#             # Your causal mask is bool [T, T] — convert to additive float
+#             combined_mask = torch.zeros(
+#                 batch_size, self.num_heads, T_new, attn_mask.shape[-1],
+#                 dtype=q.dtype, device=q.device
+#             )
+#             combined_mask.masked_fill_(attn_mask, float('-inf'))
+
+#         if key_padding_mask is not None:
+#             # [B, T_kv] -> [B, 1, 1, T_kv]
+#             kv_pad = torch.zeros(
+#                 batch_size, 1, 1, key_padding_mask.shape[-1],
+#                 dtype=q.dtype, device=q.device
+#             )
+#             kv_pad.masked_fill_(key_padding_mask[:, None, None, :], float('-inf'))
+#             combined_mask = kv_pad if combined_mask is None else combined_mask + kv_pad
+
+#         if past_kv is not None and T_new == 1 and 'positions' in past_kv:
+#             # Mask pre-allocated KV slots beyond current sequence length
+#             T_kv = k.shape[2]
+#             kv_pos_mask = torch.zeros(
+#                 1, 1, 1, T_kv,
+#                 dtype=q.dtype, device=q.device
+#             )
+#             pos_invalid = (past_kv['positions'] >= new_len).view(1, 1, 1, -1)
+#             kv_pos_mask.masked_fill_(pos_invalid, float('-inf'))
+#             combined_mask = kv_pos_mask if combined_mask is None else combined_mask + kv_pos_mask
+
+#         if need_weights:
+#             # sdpa doesn't return weights — fall back to manual for this case
+#             if self.qk_norm:
+#                 attn_scores = self.g_scale * q @ k.transpose(2, 3)
+#             else:
+#                 attn_scores = self.d_k * q @ k.transpose(2, 3)
+#             if combined_mask is not None:
+#                 attn_scores = attn_scores + combined_mask
+#             attn_scores = F.softmax(attn_scores, dim=-1)
+#             attn_scores = self.dropout(attn_scores)
+#             attn_output = (attn_scores @ v).transpose(1, 2).contiguous().view(batch_size, T_new, embed_dim)
+#             return attn_output, attn_scores
+
+#         # qk_norm uses a learned scale — sdpa's built-in scale param isn't
+#         # sufficient here, so we pre-scale q before passing in
+#         if self.qk_norm:
+#             # Pre-multiply q by g_scale so sdpa's internal scale=1.0 is correct
+#             q = q * self.g_scale
+#             attn_output = sdpa(q, k, v,
+#                                attn_mask=combined_mask,
+#                                dropout_p=self.dropout.p if self.training else 0.0,
+#                                scale=1.0)
+#         else:
+#             attn_output = sdpa(q, k, v,
+#                                attn_mask=combined_mask,
+#                                dropout_p=self.dropout.p if self.training else 0.0,
+#                                scale=self.d_k)
+
+#         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, T_new, embed_dim)
+#         return attn_output, updated_cache
 
 class TransformerBlock(nn.Module):
     def __init__(self, embed_dim, num_heads, mlp_scale: int = 2, drop_rate: float = 0.2,
@@ -769,6 +1048,7 @@ class ECAL_GPT(nn.Module):
             cache_list.append({
                 'k': cache_k,
                 'v': cache_v,
+                'rope_offset': torch.tensor(0, dtype=torch.long, device=device),
                 'seq_len': torch.tensor(0, dtype=torch.long, device=device),
                 'positions': torch.arange(max_len, dtype=torch.long, device=device)
             })
@@ -1514,7 +1794,7 @@ class ECAL_GPT(nn.Module):
 
         device = self.device
         B = initial_energy.shape[0]
-        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        dtype = AMP_DTYPE if device == "cuda" else torch.float32
 
         if initial_energy.dim() == 1:
             initial_energy = initial_energy.unsqueeze(1)
@@ -1575,6 +1855,8 @@ class ECAL_GPT(nn.Module):
 
             for cache in kv_caches:
                     cache['seq_len'].fill_(2)  # first step wrote 2 tokens: init_e + sos
+                    cache['rope_offset'].fill_(1) # Ensure RoPE offset is correct for next step
+
             x_first = self.LN(x_first)
             h_last = x_first[:, -1, :]
 
@@ -1622,6 +1904,7 @@ class ECAL_GPT(nn.Module):
 
                     for cache in kv_caches:
                         cache['seq_len'].fill_(seq_len_for_cache)
+                        cache['rope_offset'].fill_(step)
 
                     self.forward_decode_step_static(
                         buffers, kv_caches, seq_len_for_cache, material_index, particle_type, lora_modules=lora_modules
@@ -1651,6 +1934,7 @@ class ECAL_GPT(nn.Module):
 
             for cache in kv_caches:
                 cache['seq_len'].fill_(capture_step + 1)
+                cache['rope_offset'].fill_(capture_step) 
 
         graph = torch.cuda.CUDAGraph()
         with torch.amp.autocast('cuda', dtype=dtype):
@@ -1695,7 +1979,7 @@ class ECAL_GPT(nn.Module):
                 # Update cache seq_len for all layers
                 for cache in kv_caches:
                     cache['seq_len'].fill_(seq_len_for_cache)
-
+                    cache['rope_offset'].fill_(step)
                 # Replay the captured graph
                 graph.replay()
 

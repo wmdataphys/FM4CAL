@@ -216,8 +216,9 @@ def main(config,args):
     buffers = {"idx": [], "ene": [], "idx_t": [], "ene_t": [], "initE": [], "material_index": []}
     flush_size = config['Inference']['flush_size']
 
+    counter = 0
     for i, data in enumerate(dataloader):
-        if i == args.num_showers:
+        if counter == args.num_showers:
             break
 
         pos, _ , initial_energy, material_index, initial_energy_t, ene = data
@@ -226,7 +227,10 @@ def main(config,args):
         material_index = material_index.to(device).long()
         initial_energy_t = initial_energy_t.numpy()
 
-        torch.cuda.empty_cache()
+        # Determine particle type from the material name for this batch
+        mat_idx = material_index[0].item()  # assumes uniform batch
+        mat_name = material_list[mat_idx]
+        particle_type = "e-" if "e-" in mat_name else "gamma"
 
         with torch.inference_mode():
             if args.use_amp:
@@ -309,6 +313,8 @@ def main(config,args):
         kbar.update(i + 1)
 
 
+    counter += data[0].shape[0]
+    
     w.close()
 
 
