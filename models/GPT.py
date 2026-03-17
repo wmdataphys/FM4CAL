@@ -57,7 +57,6 @@ class CrossAttention(nn.Module):
         self.d_k = self.head_dim ** -0.5
         self.device = device
         self.qk_norm = qk_norm
-        print(f"Cross-Attention QK Normalization: {self.qk_norm}")
         if self.qk_norm:
             self.g_scale = nn.Parameter(torch.tensor(1.0 / self.d_k, dtype=torch.float, device=self.device), requires_grad=True)
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
@@ -212,9 +211,6 @@ class CATransformerBlock(nn.Module):
         if self.use_MoE:
             self.num_experts = num_experts
             self.num_classes = num_classes
-            print("CA: ") 
-            print("Number of experts: ", self.num_experts)
-            print("Num Classes: ", self.num_classes)
             self.FF = MoE(self.embed_dim, mlp_scale=self.mlp_scale, num_experts=self.num_experts, num_classes=self.num_classes)
         else:
             self.FF = FF(self.embed_dim, mlp_scale=self.mlp_scale)
@@ -281,7 +277,6 @@ class MHSA(nn.Module):
         self.d_k = self.head_dim ** -0.5
         self.device = device
         self.qk_norm = qk_norm
-        print(f"MHSA QK Normalization: {self.qk_norm}")
         if self.qk_norm:
             self.g_scale = nn.Parameter(torch.tensor(1.0 / self.d_k, dtype=torch.float, device=self.device), requires_grad=True)
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
@@ -428,9 +423,6 @@ class TransformerBlock(nn.Module):
         if self.use_MoE:
             self.num_experts = num_experts
             self.num_classes = num_classes
-            print("MHSA: ") 
-            print("Number of experts: ", self.num_experts)
-            print("Num Classes: ", self.num_classes)
             self.FF = MoE(self.embed_dim, mlp_scale=self.mlp_scale, num_experts=self.num_experts, num_classes=self.num_classes)
         else:
             self.FF = FF(self.embed_dim, mlp_scale=self.mlp_scale)
@@ -541,12 +533,6 @@ class ECAL_GPT(nn.Module):
         self.num_experts = num_experts
         self.num_classes = len(self.material_list)
         self.particle_list = particle_list
-        
-        if self.use_MoE:
-            print(f"Using Mixture of Experts for materials: {self.material_list}.")
-            print("Fine tuning will expand experts and/or LoRA modules for particles.")
-        else:
-            print("Using traditional FFN.")
 
         self.digitize_energy = digitize_energy
         self.detokenize_func = detokenize_func
@@ -564,26 +550,18 @@ class ECAL_GPT(nn.Module):
         self.use_RoPE = use_RoPE
 
         if not self.use_RoPE:
-            print("Not using RoPE.")
             self.rope = None
             self.pos_embedding = nn.Embedding(seq_len, embed_dim)
             self.energy_pos_embedding = nn.Embedding(seq_len, embed_dim)
-            print(self.rope)
         else:
-            print(f"Using Partial RoPE. Theta={self.theta}, fraction = {self.rope_fraction}")
-            #self.rope = RotaryEmbedding(dim = self.embed_dim // self.attn_heads[0],
-            #                            cache_if_possible = True,
-            #                            theta = 1000)
             self.rope = PartialRoPE(embed_dim = self.embed_dim,
                                     num_heads = self.attn_heads[0], # Same for all blocks
                                     theta = self.theta,
                                     rope_fraction = self.rope_fraction)
-            print(self.rope)
 
         # Add in 3D positional embeddings if provided
         self.grid_shape = grid_shape
         if grid_shape is not None:
-            print("Using 3D positional embeddings.")
             Nz, Ny, Nx = grid_shape
             self.Nz, self.Ny, self.Nx = Nz, Ny, Nx
             num_cells = Nz * Ny * Nx
@@ -653,7 +631,6 @@ class ECAL_GPT(nn.Module):
             
             # Attention LoRA modules
             if self.enable_head_LoRA:
-                print(f"Creating LoRA modules for particle type: {particle}. LoRA_r={self.LoRA_r}, LoRA_alpha={self.LoRA_alpha} ")
                 self.particle_lora[particle] = nn.ModuleList([
                     LoRA(self.embed_dim, lora_r=self.LoRA_r, alpha=self.LoRA_alpha, drop_rate=self.drop_rates[0], device=self.device)
                     for _ in range(len(self.attn_heads))]) 
@@ -664,16 +641,14 @@ class ECAL_GPT(nn.Module):
             if self.enable_vocab_LoRA:
                 vocab_r = int(self.LoRA_r * self.vocab_LoRA_scale)
                 vocab_alpha = int(self.LoRA_alpha * self.vocab_LoRA_scale / 4)
-                print(f"Creating Vocab LoRA modules for particle type: {particle}. LoRA_r={vocab_r}, LoRA_alpha={vocab_alpha}, vocab_LoRA_scale={vocab_alpha/np.sqrt(vocab_r)} ")
                 pixel_weight = weights['logits_head'] if weights else None
                 energy_weight = weights['energy_head'] if weights else None
                 self.vocab_LoRA[particle] = nn.ModuleList([Vocab_LoRA(vocab_size=self.space_vocab, embed_dim=self.embed_dim, lora_r=vocab_r, weight=pixel_weight, alpha=vocab_alpha, drop_rate=self.drop_rates[0], device=self.device, pissa_init=pissa_init),
                                                             Vocab_LoRA(vocab_size=self.energy_vocab, embed_dim=self.embed_dim, lora_r=vocab_r, weight=energy_weight, alpha=vocab_alpha, drop_rate=self.drop_rates[0], device=self.device, pissa_init=pissa_init)])       
             elif self.learnable_vocabs:
-                print("Creating new vocab heads for particle type: ", particle)
                 self.vocab_LoRA[particle] = nn.ModuleList([nn.Linear(self.embed_dim, self.space_vocab), nn.Linear(self.embed_dim, self.energy_vocab)])  # Train new heads
             else:
-                print("Vocab heads inhereted for particle type: ", particle, ". These remain frozen during fine-tuning.")
+                pass
 
             # Embedding adapter modules
             if self.enable_embedding_adapter:

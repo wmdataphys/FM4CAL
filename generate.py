@@ -1,5 +1,5 @@
 import os
-
+import math
 # Set these BEFORE importing torch
 os.environ["TORCH_LOGS"] = "-cudagraphs" # Explicitly subtract cudagraphs from logs
 os.environ["GLOG_minloglevel"] = "3"      # Suppress C++ Google Logs (3 = Fatal)
@@ -24,15 +24,6 @@ from utils.utils import read_text, singular_value_checks
 
 def main(config,args):
 
-    if args.num_showers != -1:
-        print("\n" + "="*60)
-        print("WARNING".center(60))
-        print("="*60)
-        print("Plotting functionality may not work as intended given")
-        print("limited number of showers and materials.")
-        print("Will refine in future iterations.")
-        print("="*60 + "\n")
-
     if args.device == "cuda":
         device = 'cuda'
     else:
@@ -51,7 +42,6 @@ def main(config,args):
     num_experts = len(material_list)
     use_MoE = bool(config['model']['use_MoE'])
     digitize_energy = bool(config['digitize_energy'])
-    use_kv_cache = bool(args.use_kv_cache)
     base_model_type = config['base_model_type']
     particle_list = args.particle_list if args.particle_list is not None else config['particle_list']
     loRA_r = config['model']['LoRA_r']
@@ -67,6 +57,8 @@ def main(config,args):
     energy_res = config['stats']['token_energy_res']
     e_max = config['stats']['token_energy_max']
     e_min = config['stats']['token_energy_min']
+
+    tracks_per_file = config['dataset']['tracks_per_file']
 
     if args.materials_to_generate is not None:
         materials_to_generate = args.materials_to_generate
@@ -89,12 +81,15 @@ def main(config,args):
     print("========= Generation Started =========")
     print("Device: ", args.device)
     print("Using AMP: ", args.use_amp)
-    print("Using KV Cache: ", args.use_kv_cache)
     print("Sampling method: ", args.sampling_method)
     print("Temperature: ", args.temperature) if not args.dynamic_temp else print("Dynamic Temperature: Enabled")
     print("Generating showers for materials: ", materials_to_generate)
     print("Number of showers to generate: ", args.num_showers)
+    print("Cuda Graphs disabled: ", args.disable_cudagraphs)
     print("=====================================")
+
+    if not args.disable_cudagraphs:
+        print("Note: Only default method supported for CUDA graph generation.")
 
     print("Digitizing Energy - classification over adjacent vocabulary.")
     print("Energy vocab: ", config['model']['energy_vocab'])
@@ -151,45 +146,23 @@ def main(config,args):
 
     model.eval()
 
-    print("Photon params:")
-    print("Space vocab weight: ", model.logits_head.weight.data.cpu().numpy().mean())
-    print("Space vocab bias: ", model.logits_head.bias.data.cpu().numpy().mean())
-    print("Energy vocab weight: ", model.energy_head.weight.data.cpu().numpy().mean())
-    print("Energy vocab bias: ", model.energy_head.bias.data.cpu().numpy().mean())
-    print("Done.")
-    # for name, param in model.named_parameters():
-    #     if "lora" in name:
-    #         print(f"Parameter {name} has value: {param.data.cpu().numpy()}")
-
-    # (Optional) compile AFTER loading. If you stay on CPU, compiling may not help; feel free to skip.
-    # try:
-    #     if use_kv_cache == True:
-    #         model = torch.compile(model, mode="reduce-overhead", dynamic=True)
-    # except Exception as _:
-    #     # torch.compile may not be available / useful on this env; continue without it
-    #     print('Could not compile model. Continuing...')
-    #     pass
+    try:
+         model = torch.compile(model, mode="reduce-overhead", dynamic=True)
+    except Exception as _:
+        # torch.compile may not be available / useful on this env; continue without it
+        print('Could not compile model. Continuing...')
+        pass
 
     test_files = []
+    upper_bound_idx = math.ceil(args.num_showers / tracks_per_file) if args.num_showers > 0 else None
     for material in materials_to_generate:
         # e.g., material = "G4_W_gamma" -> config['dataset']['test']['G4_W_gamma_test_files']
         # e.g., material = "G4_W_electron" -> config['dataset']['test']['G4_W_electron_test_files']
-        test_files += read_text(config['dataset']['testing'][material + '_test_files'])[:4]
-        if "e-" in material:
-            particle_type = "e-"
-        elif "gamma" in material:
-            particle_type = "gamma"
-        else:
-            raise ValueError("Unknown particle type in material: ", material)
+        test_files += read_text(config['dataset']['testing'][material + '_test_files'])[:upper_bound_idx]
         
     global_e_max = config['stats']['global_energy_max']
     global_e_min = config['stats']['global_energy_min']
     stats = {"Initial_Energy_Max": global_e_max, "Initial_Energy_Min": global_e_min}
-    
-    # test_files = [twb,tab,tpb]  # for quick testing
-    # test_files = [test_files[0],test_files[1],test_files[-2],test_files[-1]]  
-    # test_files = test_files[:4] + test_files[-4:]  # for quick testing
-    # test_files = test_files[:4] # for quick testing
 
     gen_seq_len = args.gen_seq_len if args.gen_seq_len is not None else msl
 
@@ -235,15 +208,36 @@ def main(config,args):
         with torch.inference_mode():
             if args.use_amp:
                 with autocast(dtype=torch.float16):     
-                    # generated_indices, generated_energies = model.generate(
-                    #     initial_energy=initial_energy,
-                    #     material_index=material_index,
-                    #     method=args.sampling_method,
-                    #     dynamic_temp=args.dynamic_temp,
-                    #     max_seq_len=gen_seq_len,
-                    #     temperature=args.temperature,
-                    #     use_kv_cache=args.use_kv_cache,particle_type=particle_type    
-                    # )
+                    if args.disable_cudagraphs:
+                        generated_indices, generated_energies = model.generate(
+                            initial_energy=initial_energy,
+                            material_index=material_index,
+                            method=args.sampling_method,
+                            dynamic_temp=args.dynamic_temp,
+                            max_seq_len=gen_seq_len,
+                            temperature=args.temperature,
+                            particle_type=particle_type    
+                        )
+                    else:
+                        generated_indices, generated_energies = model.generate_with_cuda_graph(
+                            initial_energy=initial_energy,
+                            material_index=material_index,
+                            max_seq_len=gen_seq_len,
+                            temperature=args.temperature,
+                            particle_type=particle_type,
+                            dynamic_temp=args.dynamic_temp)
+            else:
+                if args.disable_cudagraphs:
+                    generated_indices, generated_energies = model.generate(
+                        initial_energy=initial_energy,
+                        material_index=material_index,
+                        method=args.sampling_method,
+                        dynamic_temp=args.dynamic_temp,
+                        max_seq_len=gen_seq_len,
+                        temperature=args.temperature,
+                        particle_type=particle_type    
+                    )
+                else:
                     generated_indices, generated_energies = model.generate_with_cuda_graph(
                         initial_energy=initial_energy,
                         material_index=material_index,
@@ -251,29 +245,14 @@ def main(config,args):
                         temperature=args.temperature,
                         particle_type=particle_type,
                         dynamic_temp=args.dynamic_temp)
-            else:
-                # generated_indices, generated_energies = model.generate(
-                #     initial_energy=initial_energy,
-                #     material_index=material_index,
-                #     method=args.sampling_method,
-                #     dynamic_temp=args.dynamic_temp,
-                #     max_seq_len=gen_seq_len,
-                #     temperature=args.temperature,
-                #     use_kv_cache=args.use_kv_cache,particle_type=particle_type
-                # )
-                generated_indices, generated_energies = model.generate_with_cuda_graph(
-                    initial_energy=initial_energy,
-                    material_index=material_index,
-                    max_seq_len=gen_seq_len,
-                    temperature=args.temperature,
-                    particle_type=particle_type,
-                    dynamic_temp=args.dynamic_temp)
 
             generated_indices = generated_indices.detach().cpu().numpy()
             generated_energies = generated_energies.detach().cpu().numpy()
 
             true_indices = pos.detach().cpu().numpy()
             true_energies = ene.numpy().astype(np.float32)
+
+            counter += data[0].shape[0]
 
             # collect into buffers (store each shower together)
             for b in range(generated_indices.shape[0]):
@@ -311,9 +290,6 @@ def main(config,args):
             buffers = {"idx": [], "ene": [], "idx_t": [], "ene_t": [], "initE": [], "material_index": []}
 
         kbar.update(i + 1)
-
-
-    counter += data[0].shape[0]
     
     w.close()
 
@@ -385,13 +361,11 @@ if __name__ == "__main__":
     parser.add_argument('--config', type=str, required=True, help='Path to config JSON file.')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use: "cuda" or "cpu".')
     parser.add_argument('--sampling_method', type=str, default='Default', help='Sampling method. See model.generate() for options.')
-    parser.add_argument('--use_kv_cache', action='store_true', help='Whether to use KV cache during generation.')
     parser.add_argument('--use_amp', action='store_true', help='Whether to use automatic mixed precision.')
     parser.add_argument('--num_showers', type=int, default=-1, help='Number of showers to generate for plotting. -1 for all.')
     parser.add_argument('--materials_to_generate', type=str, nargs='+', default=None, help='List of materials to generate showers for. If not set, generates for all materials in config.')
     parser.add_argument('--temperature', type=float, default=1.0, help='Sampling temperature during generation.')
     parser.add_argument('--dynamic_temp', action='store_true', help='Whether to use dynamic temperature during generation.')
-    parser.add_argument('--visualize_vocab_LoRA', action='store_true', help='Whether to visualize vocab LoRA matrices after loading model.')
     parser.add_argument('--comp_paths', type=str, nargs='+', default=None, help='Paths to additional models for comparison.')
     parser.add_argument('--model_path', type=str, default=None, help='Path to model checkpoint for generation. Overrides config if set.')
     parser.add_argument('--output_file', type=str, default=None, help='Output file name for generated showers. Overrides config if set.')
@@ -399,6 +373,7 @@ if __name__ == "__main__":
     parser.add_argument('--particle_list', type=str, nargs='+', default=None, help='List of particles to use. Overrides config if set.')
     parser.add_argument('--material_list', type=str, nargs='+', default=None, help='List of materials to use. Overrides config if set.')
     parser.add_argument('--gen_seq_len', type=int, default=None, help='Sequence length to use during generation. Overrides max_seq_length in config if set.')
+    parser.add_argument('--disable_cudagraphs', action='store_true', help='Whether to disable CUDA graphs during generation. May help with stability on some environments.')
     args = parser.parse_args()
 
     os.makedirs("Generations", exist_ok=True)

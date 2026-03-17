@@ -31,8 +31,6 @@ class LoRA(nn.Module):
         self.embed_dim = embed_dim
         self.lora_r = lora_r
         self.scale = alpha / math.sqrt(lora_r)
-        print(f"Using rank stabilization: scale = {self.scale}")
-        print(f"LoRA: embed_dim={embed_dim}, rank={lora_r}, alpha={alpha}, drop_rate={drop_rate}, mlp_scale={mlp_scale}")
         self.device = device 
         if weights is None:
             # LoRA for Q
@@ -53,7 +51,6 @@ class LoRA(nn.Module):
         else:
             # If weights are provided, apply PiSSA decomp
             # I need to further factor this like vocab LoRA - not used at the moment.
-            print("Using PiSSA decomposition for LoRA")
             Q, K, V, c_c_proj = weights
             A_Q, B_Q = decompose_weights(Q, lora_r)
             A_K, B_K = decompose_weights(K, lora_r)
@@ -104,8 +101,6 @@ class Embed_LoRA(nn.Module):
         self.embed_dim = embed_dim
         self.lora_r = lora_r
         self.scale = alpha / math.sqrt(lora_r)
-        print(f"Using rank stabilization: scale = {self.scale}")
-        print(f"Embed LoRA: embed_dim={embed_dim}, rank={lora_r}, alpha={alpha}, drop_rate={drop_rate}")
         self.device = device
 
         self.lora_A_x = nn.Parameter(torch.randn(embed_dim, lora_r) * 0.01)
@@ -131,23 +126,17 @@ class Vocab_LoRA(nn.Module):
             weight = torch.randn(vocab_size, embed_dim) * 0.01
 
         if not pissa_init:
-            print("Using standard LoRA initialization for Vocab LoRA")
             self.lora_A_vocab = nn.Parameter(torch.randn(lora_r, embed_dim) * 0.01) # A: [r, D], B: [V, r]
             self.lora_B_vocab = nn.Parameter(torch.zeros(vocab_size, lora_r))
-            print("Registering weight buffer for original vocab weight")
             self.register_buffer('residual_weight',weight)
-            print(self.residual_weight)
         else:
             # PiSSA init: weight is [V, D]
-            print("Using PiSSA decomposition for Vocab LoRA")
             A, B = decompose_vocab_weights(weight, lora_r) # A: [r, D], B: [V, r]
             self.lora_A_vocab = nn.Parameter(A)  
             self.lora_B_vocab = nn.Parameter(B) 
             self.scale = 1.0  # No scaling for PiSSA init
             res = weight - (B @ A) 
             self.register_buffer('residual_weight', res)
-            print("Registering weight buffer for residual weight")
-            print(self.residual_weight)
 
         self.dropout = nn.Dropout(drop_rate) if drop_rate > 0.0 else nn.Identity()
 
@@ -182,11 +171,9 @@ class LPE_Expansion(nn.Module):
         self.seq_len = seq_len
         self.pos_embedding = nn.Embedding(seq_len, embed_dim)
         if weight is not None:
-            print(f"Initializing LPE with provided {weight.shape} weight matrix.")
             self.pos_embedding.weight[:weight.shape[0]].data.copy_(weight)
             self.old_seq_len = weight.shape[0]
         else:
-            print("Initializing LPE with random weights.")
             self.old_seq_len = 0
 
     def mask_old_LPE_grads(self,grad):

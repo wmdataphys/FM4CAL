@@ -3,6 +3,8 @@ import math
 import h5py
 import os
 import awkward as ak
+import webbrowser
+from datetime import datetime
 
 import matplotlib as mpl
 import matplotlib.cm as cm
@@ -34,6 +36,10 @@ from utils.plotting_utils import (
     sum_energy_per_layer_unc,
     sum_energy_per_radial_distance_unc
 )
+
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots   
+
 
 # Base plotting code taken directly from Omnijet Alpha-c: https://github.com/uhh-pd-ml/omnijet_alpha_c
 
@@ -1670,7 +1676,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ymin, ymax = ax0.get_ylim()
     ax0.set_ylim(ymin, ymax + 1620 * ymax)
     ax0.set_ylim(bottom=0.1)
-    ax0.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
+    ax0.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=-2.1)
 
     ax1.set_ylabel("normalized", fontsize=fontsize_labels)
     ax1_twin.set_xlabel("energy sum [MeV]", fontsize=fontsize_labels)
@@ -1680,7 +1686,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax1.set_ylim(bottom=0)
     ymin, ymax = ax1.get_ylim()
     ax1.set_ylim(ymin, ymax + 0.45 * ymax)
-    ax1.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
+    ax1.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=-2.1)
 
     ax2.set_ylabel("normalized", fontsize=fontsize_labels)
     ax2_twin.set_xlabel("number of hits", fontsize=fontsize_labels)
@@ -1690,7 +1696,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax2.set_ylim(bottom=0)
     ymin, ymax = ax2.get_ylim()
     ax2.set_ylim(ymin, ymax + 0.44 * ymax)
-    ax2.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
+    ax2.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=-2.1)
 
     ax3.set_ylabel("normalized", fontsize=fontsize_labels)
     ax3_twin.set_xlabel("center of gravity Z [layer]", fontsize=fontsize_labels)
@@ -1700,7 +1706,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax3.set_ylim(bottom=0)
     ymin, ymax = ax3.get_ylim()
     ax3.set_ylim(ymin, ymax + 0.48 * ymax)
-    ax3.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
+    ax3.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=-2.1)
 
     ax4.set_ylabel("energy [MeV]", fontsize=fontsize_labels)
     ax4_twin.set_xlabel("layer", fontsize=fontsize_labels)
@@ -1710,7 +1716,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax4.set_ylim(bottom=0.1)
     ymin, ymax = ax4.get_ylim()
     ax4.set_ylim(ymin, ymax + 40 * ymax)
-    ax4.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
+    ax4.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=-2.1)
 
     ax5.set_ylabel("energy [MeV]", fontsize=fontsize_labels)
     ax5_twin.set_xlabel("radius [pixels]", fontsize=fontsize_labels)
@@ -1720,7 +1726,7 @@ def plot_paper_plots(feature_sets: list, labels: list = None, colors: list = Non
     ax5.set_ylim(bottom=0.1)
     ymin, ymax = ax5.get_ylim()
     ax5.set_ylim(ymin, ymax + 40 * ymax)
-    ax5.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2,columnspacing=-2.1)
+    ax5.legend(loc="upper right", fontsize=fontsize_labels - 5,ncol=2)#,columnspacing=-2.1)
 
     for ax_twin, ax, xlim in [(ax0_twin, ax0, None), (ax1_twin, ax1, None), (ax2_twin, ax2, None),
                                (ax3_twin, ax3, None), (ax4_twin, ax4, (0, 30)), (ax5_twin, ax5, (0, 21))]:
@@ -1853,7 +1859,17 @@ def make_plots(file_path,tokenizer,materials_to_plot=None,num_showers=-1,materia
 
     for material in materials_to_plot:
         print("Making plots for material:",material)
-        generated_features, ground_truth_features = read_generated(file_path, tokenizer, material_list, num_showers, material)
+        if material == "G4_Ta_e-":
+            apply_correction = True
+            topk = 1
+        elif material == "G4_Pb_e-":
+            apply_correction = True
+            topk = 3
+        else:           
+            apply_correction = False
+            topk = None
+
+        generated_features, ground_truth_features = read_generated(file_path, tokenizer, material_list, num_showers, material, apply_correction=apply_correction, topk=topk)
 
         if comparison_path and material == "G4_W_gamma":
             print("Loading Omnijet alpha_c features for comparison...")
@@ -2600,3 +2616,545 @@ def plot_bias_comp(file_path,tokenizer,materials_to_plot=None,num_showers=-1,mat
 
         # fig.tight_layout()
         fig.savefig(f"Plots/{filename}_{material}_bias_comparison.pdf", dpi=300)
+
+
+# def make_interactive_plots(event_dict):
+#     # Event dict -> {"material"} -> {"x": [], "y": [], "z": [], "E": [],"init_E": float}
+#     materials = list(event_dict.keys())
+#     num_mats = len(materials)
+    
+#     # Calculate grid dimensions
+#     cols = 3
+#     rows = (num_mats + cols - 1) // cols  # Ceiling division
+    
+#     # Create specs as a 2D list matching (rows x cols)
+#     specs = [[{'type': 'scene'} for _ in range(cols)] for _ in range(rows)]
+    
+#     names = [f"{mat}: {event_dict[mat]['init_E']:.2f} GeV - Sum: {event_dict[mat]['E'].sum():.2f} MeV" for mat in materials]
+#     print(names)
+
+#     fig = make_subplots(
+#         rows=rows, cols=cols,
+#         subplot_titles=names,
+#         specs=specs
+#     )
+
+#     # Add a trace for each material
+#     for idx, mat in enumerate(materials):
+#         # Calculate row and col from flat index
+#         row = idx // cols + 1
+#         col = idx % cols + 1
+#         energy_sum = np.sum(event_dict[mat]['E'])
+        
+#         data = event_dict[mat]
+        
+#         # Normalize energies for better color mapping
+#         energy_min = np.min(data['E'])
+#         energy_max = np.max(data['E'])
+#         energy_normalized = (data['E'] - energy_min) / (energy_max - energy_min + 1e-6)
+        
+#         fig.add_trace(
+#             go.Scatter3d(
+#                 x=data['x'], y=data['y'], z=data['z'],
+#                 mode='markers',
+#                 marker=dict(
+#                     size=5,
+#                     color=energy_normalized,  # Use normalized energy for better contrast
+#                     colorscale='Viridis',
+#                     showscale=(idx == 0),  # Show colorbar only on first plot
+#                     colorbar=dict(
+#                         title="Energy (MeV)",
+#                         thickness=15,
+#                         len=0.7
+#                     ),
+#                     opacity=0.8,
+#                     line=dict(width=0)  # No edge lines for cleaner look
+#                 ),
+#                 text=[f"E: {e:.2f} MeV" for e in data['E']],  # Hover text
+#                 hovertemplate="<b>Position</b><br>X: %{x}<br>Y: %{y}<br>Z: %{z}<br>%{text}<extra></extra>",
+#                 name=mat
+#             ),
+#             row=row, col=col
+#         )
+
+#     # Set up camera for each subplot with 45-degree tilt
+#     # Camera positioned to look at Z axis at 45 degrees
+#     camera = dict(
+#         eye=dict(x=1.5, y=1.5, z=1.5)  # 45-degree angle viewing
+#     )
+    
+#     # Build dynamic scene updates based on number of materials
+#     layout_updates = {
+#         'title_text': "Material Event Analysis - 3D Shower Visualization",
+#         'height': 500 * rows, 
+#         'width': 600 * cols,
+#         'showlegend': False
+#     }
+    
+#     # Add scene camera updates for all subplots
+#     for i in range(1, num_mats + 1):
+#         scene_name = 'scene' if i == 1 else f'scene{i}'
+#         layout_updates[scene_name] = dict(
+#             camera=camera,
+#             xaxis_title="X [cells]",
+#             yaxis_title="Y [cells]",
+#             zaxis_title="Z [layers]",
+#             xaxis=dict(showgrid=True, gridwidth=1, gridcolor='lightgray'),
+#             yaxis=dict(showgrid=True, gridwidth=1, gridcolor='lightgray'),
+#             zaxis=dict(showgrid=True, gridwidth=1, gridcolor='lightgray')
+#         )
+    
+#     fig.update_layout(**layout_updates)
+    
+#     fig.show()
+
+def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=100):
+    """Truncate a colormap to use only a portion of the color range."""
+    new_cmap = mpl.colors.LinearSegmentedColormap.from_list(
+        'trunc({n},{a:.2f},{b:.2f})'.format(n=cmap.name, a=minval, b=maxval),
+        cmap(np.linspace(minval, maxval, n)))
+    return new_cmap
+
+
+def make_interactive_plots(event_dict):
+    """
+    Create interactive 3D Plotly visualization with voxel-style cubes,
+    matching the matplotlib reference style with proper z-axis orientation.
+    """
+    materials = list(event_dict.keys())
+    num_mats = len(materials)
+    
+    # Calculate grid dimensions
+    cols = 3
+    rows = (num_mats + cols - 1) // cols
+    
+    # Create specs as a 2D list matching (rows x cols)
+    specs = [[{'type': 'scene'} for _ in range(cols)] for _ in range(rows)]
+    
+    names = [f"{mat}: {event_dict[mat]['init_E']:.2f} GeV - Sum: {event_dict[mat]['E'].sum():.2f} MeV" 
+             for mat in materials]
+    print(names)
+
+    fig = make_subplots(
+        rows=rows, cols=cols,
+        subplot_titles=names,
+        specs=specs,
+        horizontal_spacing=0.002,
+        vertical_spacing=0.002
+    )
+
+    # Prepare colormap
+    cmap = truncate_colormap(mpl.cm.jet, 0.0, 0.7)
+
+    # Add a trace for each material
+    for idx, mat in enumerate(materials):
+        # Calculate row and col from flat index
+        row = idx // cols + 1
+        col = idx % cols + 1
+        
+        data = event_dict[mat]
+        
+        # Normalize energies for logarithmic opacity scaling
+        energy_min = np.min(data['E'])
+        energy_max = np.max(data['E'])
+        
+        xL, yL, zL, cL = [], [], [], []
+        colors_list = []
+        
+        # Collect voxel positions and energies
+        for x, y, z, e in zip(data['x'], data['y'], data['z'], data['E']):
+            xL.append(x)  
+            yL.append(y)  
+            zL.append(z)  
+            cL.append(e)
+            
+            # Get color from normalized energy
+            norm = mpl.colors.LogNorm(vmin=energy_min, vmax=energy_max)
+            norm_val = norm(e)
+            color_rgba = cmap(norm_val)
+            
+            # Calculate opacity based on log scale
+            norm_max = energy_max
+            alp2 = 0.1 + 0.9 * np.log(e * 10) / np.log(norm_max * 10)
+            alp2 = float(np.clip(alp2, 0.1, 0.95))
+            
+            # ✅ Bake opacity into RGBA color string
+            rgba_str = f'rgba({int(color_rgba[0]*255)},{int(color_rgba[1]*255)},{int(color_rgba[2]*255)},{alp2})'
+            colors_list.append(rgba_str)
+        
+        xL = np.array(xL)
+        yL = np.array(yL)
+        zL = np.array(zL)
+        cL = np.array(cL)
+        
+        fig.add_trace(
+            go.Scatter3d(
+                x=xL, y=yL, z=zL,
+                mode='markers',
+                marker=dict(
+                    size=6,
+                    color=colors_list,  
+                    line=dict(width=0)
+                ),
+                text=[f"E: {e:.2f} MeV" for e in cL],
+                hovertemplate="<b>Voxel</b><br>X: %{x:.1f}<br>Y: %{y:.1f}<br>Z: %{z:.1f}<br>%{text}<extra></extra>",
+                name=mat,
+                showlegend=False
+            ),
+            row=row, col=col
+        )
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=[15, 15],  # x stays at 15
+                y=[15, 15],  # y stays at 15
+                z=[0, 30],   # z goes from 0 to 30
+                mode='lines',
+                line=dict(
+                    color='black',
+                    width=4,
+                    dash='solid'
+                ),
+                hoverinfo='skip',
+                name='z-axis',
+                showlegend=False
+            ),
+            row=row, col=col
+        )
+
+    # Set up camera for each subplot
+    camera = dict(
+        eye=dict(x=2.0, y=1.5, z=2.0),
+        center=dict(x=0, y=0, z=0),
+        up=dict(x=0, y=1, z=0)
+    )
+    
+    # Build dynamic scene updates based on number of materials
+    layout_updates = {
+        'title_text': "Material Event Analysis - 3D Shower Visualization",
+        'height': 500 * rows, 
+        'width': 700 * cols,
+        'showlegend': False
+    }
+    
+    for i in range(1, num_mats + 1):
+        scene_name = 'scene' if i == 1 else f'scene{i}'
+        layout_updates[scene_name] = dict(
+            camera=camera,
+            xaxis=dict(
+                title="x [cells]",
+                title_font=dict(size=18),  # ✅ Use title_font instead of titlefont
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='lightgray',
+                range=[0, 30],
+                tickfont=dict(size=14)  # ✅ Larger tick font
+            ),
+            yaxis=dict(
+                title="y [cells]",
+                title_font=dict(size=18),  # ✅ Use title_font instead of titlefont
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='lightgray',
+                range=[0, 30],
+                tickfont=dict(size=14)  # ✅ Larger tick font
+            ),
+            zaxis=dict(
+                title="z [layers]",
+                title_font=dict(size=18),  # ✅ Use title_font instead of titlefont
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='lightgray',
+                range=[0, 30],
+                tickfont=dict(size=14)  # ✅ Larger tick font
+            ),
+            aspectmode='cube'
+        )
+    
+    fig.update_layout(**layout_updates)
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=60, b=10)  # Minimal margins
+    )
+    fig.show()
+
+def make_animated_event_viewer(event_dict, output_dir="Generations", sort_by="z"):
+    """
+    Create an interactive animated event viewer showing shower development.
+    
+    Parameters:
+    -----------
+    event_dict : dict
+        Dictionary with material names as keys, each containing 'x', 'y', 'z', 'E' arrays
+    output_dir : str
+        Directory to save the HTML file
+    sort_by : str
+        "z" for z-position progression, "energy" for energy-ordered hits
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    materials = list(event_dict.keys())
+    num_mats = len(materials)
+    
+    cols = 3
+    rows = (num_mats + cols - 1) // cols
+    specs = [[{'type': 'scene'} for _ in range(cols)] for _ in range(rows)]
+    
+    names = [f"{mat}: {event_dict[mat]['init_E']:.2f} GeV - Sum: {event_dict[mat]['E'].sum():.2f} MeV" 
+             for mat in materials]
+    
+    fig = make_subplots(
+        rows=rows, cols=cols,
+        subplot_titles=names,
+        specs=specs,
+        horizontal_spacing=0.002,
+        vertical_spacing=0.002
+    )
+    
+    cmap = truncate_colormap(mpl.cm.jet, 0.0, 0.7)
+    camera = dict(
+        eye=dict(x=1.5, y=1.2, z=1.5),
+        center=dict(x=0, y=0, z=0),
+        up=dict(x=0, y=1, z=0)
+    )
+    
+    # ===== CREATE FRAMES BASED ON SORT_BY =====
+    z_frames = []
+    energy_frames = []
+    
+    if sort_by == "z":
+        # Z-progression: show hits layer by layer
+        z_max = int(max([max(event_dict[mat]['z']) for mat in materials]))
+        z_layers = np.arange(0, z_max + 1)
+        
+        for z_layer in z_layers:
+            frame_data = []
+            for mat in materials:
+                data = event_dict[mat]
+                
+                # Filter hits up to current z layer
+                mask = data['z'] <= z_layer
+                x_filtered = data['x'][mask]
+                y_filtered = data['y'][mask]
+                z_filtered = data['z'][mask]
+                E_filtered = data['E'][mask]
+                
+                if len(E_filtered) == 0:
+                    frame_data.append(go.Scatter3d(x=[], y=[], z=[], mode='markers', showlegend=False))
+                    frame_data.append(go.Scatter3d(x=[], y=[], z=[], mode='lines', showlegend=False))
+                    continue
+                
+                energy_min = np.min(data['E'])
+                energy_max = np.max(data['E'])
+                norm = mpl.colors.LogNorm(vmin=energy_min, vmax=energy_max)
+                
+                colors_list = []
+                for e in E_filtered:
+                    norm_val = norm(e)
+                    color_rgba = cmap(norm_val)
+                    alp2 = 0.1 + 0.9 * np.log(e * 10) / np.log(energy_max * 10)
+                    alp2 = float(np.clip(alp2, 0.1, 0.95))
+                    rgba_str = f'rgba({int(color_rgba[0]*255)},{int(color_rgba[1]*255)},{int(color_rgba[2]*255)},{alp2})'
+                    colors_list.append(rgba_str)
+                
+                frame_data.append(
+                    go.Scatter3d(
+                        x=x_filtered, y=y_filtered, z=z_filtered,
+                        mode='markers',
+                        marker=dict(size=6, color=colors_list, line=dict(width=0)),
+                        text=[f"E: {e:.2f} MeV" for e in E_filtered],
+                        hovertemplate="<b>Voxel</b><br>X: %{x:.1f}<br>Y: %{y:.1f}<br>Z: %{z:.1f}<br>%{text}<extra></extra>",
+                        showlegend=False
+                    )
+                )
+                
+                frame_data.append(
+                    go.Scatter3d(
+                        x=[15, 15], y=[15, 15], z=[0, min(z_layer, 30)],
+                        mode='lines',
+                        line=dict(color='black', width=4),
+                        hoverinfo='skip',
+                        showlegend=False
+                    )
+                )
+            
+            z_frames.append(go.Frame(data=frame_data, name=f"z_{int(z_layer):02d}"))
+    
+    elif sort_by == "energy":
+        # Energy-progression: show hits from highest to lowest energy
+        all_hits = []
+        for mat in materials:
+            data = event_dict[mat]
+            for x, y, z, e in zip(data['x'], data['y'], data['z'], data['E']):
+                all_hits.append({'x': x, 'y': y, 'z': z, 'E': e, 'mat': mat})
+        
+        all_hits_sorted = sorted(all_hits, key=lambda h: h['E'], reverse=True)
+        total_hits = len(all_hits_sorted)
+        step_size = max(1, total_hits // 50)
+        
+        for num_hits in range(0, total_hits + 1, step_size):
+            frame_data = []
+            for mat in materials:
+                data = event_dict[mat]
+                energy_min = np.min(data['E'])
+                energy_max = np.max(data['E'])
+                norm = mpl.colors.LogNorm(vmin=energy_min, vmax=energy_max)
+                
+                mat_hits = [h for h in all_hits_sorted[:num_hits] if h['mat'] == mat]
+                
+                if len(mat_hits) == 0:
+                    frame_data.append(go.Scatter3d(x=[], y=[], z=[], mode='markers', showlegend=False))
+                    frame_data.append(go.Scatter3d(x=[], y=[], z=[], mode='lines', showlegend=False))
+                    continue
+                
+                x_hits = np.array([h['x'] for h in mat_hits])
+                y_hits = np.array([h['y'] for h in mat_hits])
+                z_hits = np.array([h['z'] for h in mat_hits])
+                E_hits = np.array([h['E'] for h in mat_hits])
+                
+                colors_list = []
+                for e in E_hits:
+                    norm_val = norm(e)
+                    color_rgba = cmap(norm_val)
+                    alp2 = 0.1 + 0.9 * np.log(e * 10) / np.log(energy_max * 10)
+                    alp2 = float(np.clip(alp2, 0.1, 0.95))
+                    rgba_str = f'rgba({int(color_rgba[0]*255)},{int(color_rgba[1]*255)},{int(color_rgba[2]*255)},{alp2})'
+                    colors_list.append(rgba_str)
+                
+                frame_data.append(
+                    go.Scatter3d(
+                        x=x_hits, y=y_hits, z=z_hits,
+                        mode='markers',
+                        marker=dict(size=6, color=colors_list, line=dict(width=0)),
+                        text=[f"E: {e:.2f} MeV" for e in E_hits],
+                        hovertemplate="<b>Voxel</b><br>X: %{x:.1f}<br>Y: %{y:.1f}<br>Z: %{z:.1f}<br>%{text}<extra></extra>",
+                        showlegend=False
+                    )
+                )
+                
+                frame_data.append(
+                    go.Scatter3d(
+                        x=[15, 15], y=[15, 15], z=[0, 30],
+                        mode='lines',
+                        line=dict(color='black', width=4),
+                        hoverinfo='skip',
+                        showlegend=False
+                    )
+                )
+            
+            progress = num_hits / max(total_hits, 1)
+            energy_frames.append(go.Frame(data=frame_data, name=f"e_{progress:.2f}"))
+    
+    # ===== CREATE INITIAL FRAME (all data) =====
+    initial_traces = []
+    for idx, mat in enumerate(materials):
+        data = event_dict[mat]
+        energy_min = np.min(data['E'])
+        energy_max = np.max(data['E'])
+        norm = mpl.colors.LogNorm(vmin=energy_min, vmax=energy_max)
+        
+        colors_list = []
+        for e in data['E']:
+            norm_val = norm(e)
+            color_rgba = cmap(norm_val)
+            alp2 = 0.1 + 0.9 * np.log(e * 10) / np.log(energy_max * 10)
+            alp2 = float(np.clip(alp2, 0.1, 0.95))
+            rgba_str = f'rgba({int(color_rgba[0]*255)},{int(color_rgba[1]*255)},{int(color_rgba[2]*255)},{alp2})'
+            colors_list.append(rgba_str)
+        
+        initial_traces.append(
+            go.Scatter3d(
+                x=data['x'], y=data['y'], z=data['z'],
+                mode='markers',
+                marker=dict(size=6, color=colors_list, line=dict(width=0)),
+                text=[f"E: {e:.2f} MeV" for e in data['E']],
+                hovertemplate="<b>Voxel</b><br>X: %{x:.1f}<br>Y: %{y:.1f}<br>Z: %{z:.1f}<br>%{text}<extra></extra>",
+                showlegend=False
+            )
+        )
+        
+        initial_traces.append(
+            go.Scatter3d(
+                x=[15, 15], y=[15, 15], z=[0, 30],
+                mode='lines',
+                line=dict(color='black', width=4),
+                hoverinfo='skip',
+                showlegend=False
+            )
+        )
+    
+    for trace in initial_traces:
+        fig.add_trace(trace)
+    
+    # ===== SELECT CORRECT FRAMES =====
+    if sort_by == "z":
+        fig.frames = z_frames
+    else:
+        fig.frames = energy_frames
+        # Calculate total hits for energy mode
+        all_hits = []
+        for mat in materials:
+            data = event_dict[mat]
+            for x, y, z, e in zip(data['x'], data['y'], data['z'], data['E']):
+                all_hits.append({'x': x, 'y': y, 'z': z, 'E': e, 'mat': mat})
+        total_hits = len(all_hits)
+    
+    slider_steps = [
+        dict(
+            args=[[f.name], {'frame': {'duration': 0, 'redraw': True}, 'mode': 'immediate'}],
+            label=f.name.split('_')[1] if sort_by == "z" else f"{int(float(f.name.split('_')[1]) * total_hits)}",  # ✅ Convert to hit count
+            method='animate'
+        )
+        for f in fig.frames
+    ]
+    
+    # Set up layout with animation controls
+    layout_updates = {
+        'title_text': f"Interactive Event Viewer - {sort_by.upper()} Progression",
+        'height': 800 * rows,
+        'width': 1000 * cols,
+        'showlegend': False,
+        'updatemenus': [
+            dict(
+                type='buttons',
+                showactive=True,
+                y=0.95, x=0.01, xanchor='left', yanchor='top',
+                buttons=[
+                    dict(label='▶ Play', method='animate',
+                         args=[None, {'frame': {'duration': 100, 'redraw': True}, 'fromcurrent': True}]),
+                    dict(label='⏸ Pause', method='animate',
+                         args=[[None], {'frame': {'duration': 0, 'redraw': False}, 'mode': 'immediate'}])
+                ]
+            )
+        ],
+        'sliders': [
+            dict(
+                active=0,
+                yanchor='top', y=-0.02,
+                xanchor='left', x=0.05,
+                len=0.2,
+                transition={'duration': 0},
+                steps=slider_steps
+            )
+        ],
+        'margin': dict(l=10, r=10, t=100, b=50)
+    }
+    
+    for i in range(1, num_mats + 1):
+        scene_name = 'scene' if i == 1 else f'scene{i}'
+        layout_updates[scene_name] = dict(
+            camera=camera,
+            xaxis=dict(title="x [cells]", title_font=dict(size=20), tickfont=dict(size=14), range=[0, 30]),
+            yaxis=dict(title="y [cells]", title_font=dict(size=20), tickfont=dict(size=14), range=[0, 30]),
+            zaxis=dict(title="z [layers]", title_font=dict(size=20), tickfont=dict(size=14), range=[0, 30]),
+            aspectmode='cube'
+        )
+    
+    fig.update_layout(**layout_updates)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = os.path.join(output_dir, f"event_viewer_{sort_by}_{materials[0]}.html")
+    fig.write_html(output_file)
+    print(f"Event viewer saved to: {output_file}")
+    
+    return output_file   
+

@@ -5,6 +5,7 @@
 # Ignore log files
 *.log
 *.txt
+!env.txt
 *.out
 *.prof
 
@@ -34,6 +35,7 @@ config/electron_config.json
 # Ignore build folders
 build/
 dist/
+Animations/
 
 # Ignore data folders
 data/
@@ -50,6 +52,7 @@ outputs/
 
 # Old Files to ignore
 models/GPT_orig.py
+models/GPT_Backup.py
 
 # Ignore model weights
 *Trained_Models*

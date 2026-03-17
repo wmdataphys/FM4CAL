@@ -12,14 +12,15 @@ We demonstrate that next-token calorimeter models are computationally competitiv
 ## Contents
 
 1. [Architecture](#architecture)
-2. [Example Tokenization](#example-tokenization)
-3. [Base Model Training](#training)
-4. [Material Fine-Tuning](#material-fine-tuning)
-5. [Particle Extension](#particle-extension)
-6. [Inference](#inference)
-7. [K-Fold Studies](#k-fold-studies)
-8. [Environment](#environment)
-9. [Dataset](#dataset)
+2. [Interactive Event Visualization](#interactive)
+3. [Example Tokenization](#example-tokenization)
+4. [Base Model Training](#training)
+5. [Material Fine-Tuning](#material-fine-tuning)
+6. [Particle Extension](#particle-extension)
+7. [Inference](#inference)
+8. [K-Fold Studies](#k-fold-studies)
+9. [Environment](#environment)
+10. [Dataset](#dataset)
 
 ---
 
@@ -28,6 +29,45 @@ We demonstrate that next-token calorimeter models are computationally competitiv
 ![Architecture](assets/architecture.png)
 
 The framework utilizes a core transformer backbone consisting of cross-attention and self-attention decoder blocks that remain frozen during secondary adaptation phases. Material extensibility is achieved through a Mixture-of-Experts (MoE) layer where a router directs inputs to specialized modules, allowing for the addition of new materials by fine-tuning only a singular new expert. When transitioning to different particle species, the model employs a parameter-efficient strategy using LoRA modules and expanded particle-specific vocabulary heads for pixel and energy prediction while the base photon model parameters remain static. For subsequent material expansion of an adapted model, a new expert is integrated while the previously tuned LoRA and vocabulary components are frozen to preserve the learned particle-specific features. The system is conditioned throughout these stages by a combination of spatial, kinematic, and energy query embeddings alongside a unique particle identifier.
+
+# Interactive Event Visualization
+
+Generated shower events can be visualized interactively with an animated 3D viewer. The viewer supports two animation modes:
+
+## Z-Position Progression
+
+Animate the shower development layer-by-layer through the detector:
+
+```bash
+python demo.py \
+    --config config/config.json \
+    --initial_energy 50.0 \
+    --animated_viewer
+```
+
+This generates an HTML file in the `Animations/` folder showing voxels appearing progressively from z=0 to z=max.
+
+| Photon | Electron |
+|--------|----------|
+| <iframe src="assets/event_viewer_z_G4_W_gamma.html" width="100%" height="600" frameborder="0"></iframe> | <iframe src="assets/event_viewer_z_G4_W_e-.html" width="100%" height="600" frameborder="0"></iframe> |
+
+
+## Energy-Ordered Progression
+
+Animate the shower by adding hits from highest to lowest energy:
+
+```bash
+python demo.py \
+    --config config/config.json \
+    --initial_energy 50.0 \
+    --animated_viewer
+```
+
+This generates an HTML file showing the full cube initially filled with a center line, then voxels are highlighted in order of decreasing energy. The slider displays the actual number of hits.
+
+| Photon | Electron |
+|--------|----------|
+| <iframe src="assets/event_viewer_energy_G4_W_gamma.html" width="100%" height="600" frameborder="0"></iframe> | <iframe src="assets/event_viewer_energy_G4_W_e-.html" width="100%" height="600" frameborder="0"></iframe> |
 
 # Example Tokenization
 
@@ -110,12 +150,11 @@ Inference runs on single or multiple GPUs. Config specifies output file, but can
 ```bash
 python generate.py \
     --config config/config.json \
-    --use_kv_cache \
     --materials_to_generate "material_1" "material_N" \
     --gen_seq_len MAX_SEQ_LEN
 ```
 
-Key arguments: `--dynamic_temp` (enable dynamic temperature scheduling), `--temperature TEMP` (sampling temperature). See script for full details.
+Key arguments: `--dynamic_temp` (enable dynamic temperature scheduling), `--temperature TEMP` (sampling temperature), and `--disable_cudagraphs` (slower, but possibly more stable). See script for full details.
 
 # K-Fold Studies
 
@@ -158,7 +197,6 @@ for RUN_NUM in {1..5}; do
               --output_file "G4_Pb_e-_10000Events_${RUN_NUM}.h5" \
               --inference_only \
               --model_path "$CKPT_PATH" \
-              --use_kv_cache \
               --dynamic_temp \
               --materials_to_generate "G4_Pb_e-" \
               --gen_seq_len 2700 \
