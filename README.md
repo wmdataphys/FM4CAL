@@ -244,17 +244,7 @@ Datasets can be reproduced following the instructions at [github.com/FLC-QU-hep/
 
 # Pre-trained Weights
 
-Download the pre-trained foundation model weights:
-
-```bash
-# Download from Google Drive
-wget "https://drive.google.com/uc?export=download&id=1yCICuNOSbc8MN_c5N61zdswTEUGF9uSX" -O pretrained.pth
-
-# Or using curl
-curl -L "https://drive.google.com/uc?export=download&id=1yCICuNOSbc8MN_c5N61zdswTEUGF9uSX" -o pretrained.pth
-```
-
-Place the downloaded `pretrained.pth` file in your `Trained_Models` directory, then reference it in your config:
+Download manually from the [Google Drive link](https://drive.google.com/file/d/1yCICuNOSbc8MN_c5N61zdswTEUGF9uSX/view?usp=sharing). The first time you download, Google Drive may prompt with a virus scan warning. If you get a "quota exceeded" error, try again later.
 
 ```json
 {
@@ -262,5 +252,3 @@ Place the downloaded `pretrained.pth` file in your `Trained_Models` directory, t
     ...
 }
 ```
-
-**Note:** The first time you download, Google Drive may prompt with a virus scan warning. If you get a "quota exceeded" error, try again later or download manually from the [Google Drive link](https://drive.google.com/file/d/1yCICuNOSbc8MN_c5N61zdswTEUGF9uSX/view?usp=sharing).
