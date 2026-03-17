@@ -21,7 +21,7 @@ We demonstrate that next-token calorimeter models are computationally competitiv
 8. [K-Fold Studies](#k-fold-studies)
 9. [Environment](#environment)
 10. [Dataset](#dataset)
-11. Pre-trained Weights(#weights)
+11. [Pre-trained Weights](#weights)
 
 ---
 
