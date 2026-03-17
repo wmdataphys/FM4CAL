@@ -30,8 +30,7 @@
     },
     "testing": {
       "G4_Pb_gamma_test_files": "data//Pb_Files_test.txt",
-      "G4_W_gamma_test_files_": "data/W_Files_test.txt",
-      "G4_W_gamma_test_files": "data/W_Gamma_80GeV_Files.txt",
+      "G4_W_gamma_test_files": "data/W_Files_test.txt",
       "G4_Ta_gamma_test_files": "data/Ta_Files_test.txt",
       "G4_Pb_e-_test_files": "data/Pb_Electron_Files_test.txt",
       "G4_W_e-_test_files": "data/W_Electron_Files_test.txt",
@@ -55,7 +54,7 @@
     "hidden_units": 256,
     "mlp_scale": 2,
     "drop_rates": [0.0, 0.0, 0.0],
-    "max_seq_length": 2700,
+    "max_seq_length": 1800,
     "use_MoE": true,
     "LoRA_r": 128,
     "LoRA_alpha": 32,
