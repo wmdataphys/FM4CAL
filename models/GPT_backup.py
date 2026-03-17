@@ -4,10 +4,8 @@ import pkbar
 import copy
 import contextlib
 
-
 from models.MoE import MoE, Router, Expert
 from models.LoRA import LoRA ,Embed_LoRA, Vocab_LoRA, ConditionedAdapter, LPE_Expansion
-from models.RoPE import PartialRoPE
 
 import torch
 import torch.nn as nn
@@ -15,6 +13,7 @@ from torch.nn import functional as F
 from torch.nn.functional import scaled_dot_product_attention as sdpa
 import math
 
+from rotary_embedding_torch import RotaryEmbedding
 
 torch.backends.cuda.enable_flash_sdp(True)         # use FlashAttention when possible
 torch.backends.cuda.enable_mem_efficient_sdp(True) # fallback fused kernel
@@ -23,9 +22,7 @@ torch.backends.cuda.enable_math_sdp(False)         # prefer the fast paths
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 # Prefer BF16 if your GPU supports it; else FP16 is fine
-# 16-bit presicion causes RoPE drift 
-#AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-AMP_DTYPE = torch.float32
+AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
 class FF(nn.Module):
     def __init__(self, embed_dim, mlp_scale: int = 2,
@@ -103,9 +100,8 @@ class CrossAttention(nn.Module):
                 q_hits, k_hits = q[:, :, 1:, :], k[:, :, 1:, :]
                 
                 # Hits start at offset 1
-                # q_hits = rope.rotate_queries_or_keys(q_hits, offset=1)
-                # k_hits = rope.rotate_queries_or_keys(k_hits, offset=1)
-                q_hits, k_hits = rope(q_hits, k_hits, offset=1)
+                q_hits = rope.rotate_queries_or_keys(q_hits, offset=1)
+                k_hits = rope.rotate_queries_or_keys(k_hits, offset=1)
                 
                 q = torch.cat([q_global, q_hits], dim=2)
                 k = torch.cat([k_global, k_hits], dim=2)
@@ -113,41 +109,32 @@ class CrossAttention(nn.Module):
                 # offset is simply the current length of the KV cache.
                 offset = past_kv['seq_len'] 
                 
-                #q = rope.rotate_queries_or_keys(q, offset=offset)
-                #k = rope.rotate_queries_or_keys(k, offset=offset)
-                q, k = rope(q, k, offset=offset)
+                q = rope.rotate_queries_or_keys(q, offset=offset)
+                k = rope.rotate_queries_or_keys(k, offset=offset)
 
         # Normalize Q and K
-        if self.qk_norm:
-            k = F.normalize(k, p=2, dim=-1)
-            q = F.normalize(q, p=2, dim=-1)
+        # if self.qk_norm and self.training:
+        #     k = F.normalize(k, p=2, dim=-1)
+        #     q = F.normalize(q, p=2, dim=-1)
 
         # Handle KV cache with pre-allocation
         if past_kv is not None:
             cache_k = past_kv['k']
             cache_v = past_kv['v']
             curr_len = past_kv['seq_len']
-
-            if T_new == 1 and isinstance(curr_len, torch.Tensor):
-                # CUDA graph safe path: scatter for write, full buffer + mask for read
-                write_idx = curr_len.long().view(1, 1, 1, 1).expand(
-                    batch_size, self.num_heads, 1, self.head_dim)
-                cache_k.scatter_(2, write_idx, k)
-                cache_v.scatter_(2, write_idx, v)
-
-                new_len = curr_len + 1
-
-                # Use full buffer — unused positions masked in attention scores below
-                k = cache_k
-                v = cache_v
-            else:
-                # Prefill / training path (not in CUDA graph)
-                cache_k[:, :, curr_len:curr_len+T_new] = k
-                cache_v[:, :, curr_len:curr_len+T_new] = v
-                new_len = curr_len + T_new
-                k = cache_k[:, :, :new_len]
-                v = cache_v[:, :, :new_len]
-
+            
+            # Write new K,V into pre-allocated cache
+            cache_k[:, :, curr_len:curr_len+seq_len] = k
+            cache_v[:, :, curr_len:curr_len+seq_len] = v
+            
+            # Update sequence length
+            new_len = curr_len + seq_len
+            
+            # Use cache up to current position
+            k = cache_k[:, :, :new_len]
+            v = cache_v[:, :, :new_len]
+            
+            # Update cache dict for return
             updated_cache = {
                 'k': cache_k,
                 'v': cache_v,
@@ -156,33 +143,23 @@ class CrossAttention(nn.Module):
         else:
             updated_cache = None
 
+        is_decode = (past_kv is not None)
+
         # Compute attention scores
-        if self.qk_norm:
-            attn_scores = self.g_scale * q @ k.transpose(2, 3)
-        else:
-            attn_scores = self.d_k * q @ k.transpose(2, 3)
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,  # causal mask or None
+            dropout_p=self.dropout.p if self.training else 0.0,
+            is_causal=not is_decode       # control causality via mask + KV cache
+        )
 
-        if attn_mask is not None:
-            attn_scores.masked_fill_(attn_mask, -torch.inf)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_len, embed_dim)
 
-        if key_padding_mask is not None:
-            key_padding_mask = key_padding_mask[:, None, None, :]
-            attn_scores.masked_fill_(key_padding_mask, -torch.inf)
-
-        if past_kv is not None and T_new == 1 and 'positions' in past_kv:
-            kv_mask = (past_kv['positions'] >= new_len).view(1, 1, 1, -1)
-            attn_scores.masked_fill_(kv_mask, -torch.inf)
-
-        attn_scores = F.softmax(attn_scores, dim=-1)
-        attn_scores = self.dropout(attn_scores)
-
-        attn_output = (attn_scores @ v).transpose(1, 2)
-        attn_output = attn_output.contiguous().view(batch_size, seq_len, embed_dim)
-
-        if need_weights:
-            return attn_output, attn_scores
-        else:
-            return (attn_output, updated_cache)
+        # if need_weights:
+        #     return attn_output, attn_scores
+        # else:
+        return (attn_output, updated_cache)
 
 
 class CATransformerBlock(nn.Module):
@@ -209,6 +186,8 @@ class CATransformerBlock(nn.Module):
         self.c_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.LN2 = nn.LayerNorm(self.embed_dim)
 
+        self.register_buffer('_load_balance_placeholder', torch.tensor([0.0], dtype=torch.float32))
+
         if self.use_MoE:
             self.num_experts = num_experts
             self.num_classes = num_classes
@@ -233,24 +212,15 @@ class CATransformerBlock(nn.Module):
 
         x_norm = self.xN(x)
         e_norm = self.eN(e_embed)
-        load_balance = 0.0#torch.tensor([0.0], dtype=torch.float32, device=self.device)  # place holder
 
-        if past_kv is None:
-            need_causal = True
-        elif N_t == 1:
-            need_causal = False  # single-token decode step, never needs causal mask
-        else:
-            # past_kv exists and N_t > 1 (prefill into cache)
-            seq_len_val = past_kv["seq_len"]
-            if isinstance(seq_len_val, torch.Tensor):
-                seq_len_val = seq_len_val.item()  # only happens outside graph capture
-            need_causal = (seq_len_val == 0)
-        mask_ = self.generate_mask(N_t) if need_causal else None
+        # need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
+        # mask_ = self.generate_mask(N_t) if need_causal else None
+
 
         attn_out, kv_ca = self.attn(x_norm,
                                     e_norm,
                                     key_padding_mask=padding_mask,
-                                    attn_mask=mask_,
+                                    attn_mask=None,
                                     past_kv=past_kv,
                                     rope=rope,
                                     LoRA_module=LoRA_module)
@@ -327,9 +297,8 @@ class MHSA(nn.Module):
                 q_hits, k_hits = q[:, :, 1:, :], k[:, :, 1:, :]
                 
                 # Hits start at offset 1
-                # q_hits = rope.rotate_queries_or_keys(q_hits, offset=1)
-                # k_hits = rope.rotate_queries_or_keys(k_hits, offset=1)
-                q_hits, k_hits = rope(q_hits, k_hits, offset=1)
+                q_hits = rope.rotate_queries_or_keys(q_hits, offset=1)
+                k_hits = rope.rotate_queries_or_keys(k_hits, offset=1)
                 
                 q = torch.cat([q_global, q_hits], dim=2)
                 k = torch.cat([k_global, k_hits], dim=2)
@@ -337,41 +306,32 @@ class MHSA(nn.Module):
                 # offset is simply the current length of the KV cache.
                 offset = past_kv['seq_len'] 
                 
-                #q = rope.rotate_queries_or_keys(q, offset=offset)
-                #k = rope.rotate_queries_or_keys(k, offset=offset)
-                q, k = rope(q, k, offset=offset)
+                q = rope.rotate_queries_or_keys(q, offset=offset)
+                k = rope.rotate_queries_or_keys(k, offset=offset)
 
         # Normalize Q and K
-        if self.qk_norm:
-            k = F.normalize(k, p=2, dim=-1)
-            q = F.normalize(q, p=2, dim=-1)
+        # if self.qk_norm and self.training:
+        #     k = F.normalize(k, p=2, dim=-1)
+        #     q = F.normalize(q, p=2, dim=-1)
 
         # Handle KV cache with pre-allocation
         if past_kv is not None:
             cache_k = past_kv['k']
             cache_v = past_kv['v']
             curr_len = past_kv['seq_len']
-
-            if T_new == 1 and isinstance(curr_len, torch.Tensor):
-                # CUDA graph safe path: scatter for write, full buffer + mask for read
-                write_idx = curr_len.long().view(1, 1, 1, 1).expand(
-                    batch_size, self.num_heads, 1, self.head_dim)
-                cache_k.scatter_(2, write_idx, k)
-                cache_v.scatter_(2, write_idx, v)
-
-                new_len = curr_len + 1
-
-                # Use full buffer — unused positions masked in attention scores below
-                k = cache_k
-                v = cache_v
-            else:
-                # Prefill / training path (not in CUDA graph)
-                cache_k[:, :, curr_len:curr_len+T_new] = k
-                cache_v[:, :, curr_len:curr_len+T_new] = v
-                new_len = curr_len + T_new
-                k = cache_k[:, :, :new_len]
-                v = cache_v[:, :, :new_len]
-
+            
+            # Write new K,V into pre-allocated cache
+            cache_k[:, :, curr_len:curr_len+T_new] = k
+            cache_v[:, :, curr_len:curr_len+T_new] = v
+            
+            # Update sequence length
+            new_len = curr_len + T_new
+            
+            # Use cache up to current position
+            k = cache_k[:, :, :new_len]
+            v = cache_v[:, :, :new_len]
+            
+            # Update cache dict for return
             updated_cache = {
                 'k': cache_k,
                 'v': cache_v,
@@ -381,33 +341,27 @@ class MHSA(nn.Module):
             updated_cache = None
 
         # Compute attention scores
-        if self.qk_norm:
-            attn_scores = self.g_scale * q @ k.transpose(2, 3)
-        else:
-            attn_scores = self.d_k * q @ k.transpose(2, 3)
-
-        if attn_mask is not None:
-            attn_scores.masked_fill_(attn_mask, -torch.inf)
-
         if key_padding_mask is not None:
-            key_padding_mask = key_padding_mask[:, None, None, :]
-            attn_scores.masked_fill_(key_padding_mask, -torch.inf)
+            # key_padding_mask: [B, T_k] True = mask
+            kpm = key_padding_mask[:, None, None, :]  # [B,1,1,T_k]
+            attn_mask = kpm if attn_mask is None else (attn_mask | kpm)
+        
+        is_decode = (past_kv is not None)
 
-        # Mask any KV positions that are outside the current sequence length (possible when using pre-allocated cache)
-        if past_kv is not None and T_new == 1 and 'positions' in past_kv:
-            kv_mask = (past_kv['positions'] >= new_len).view(1, 1, 1, -1)
-            attn_scores.masked_fill_(kv_mask, -torch.inf)
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            is_causal=not is_decode,  # you're handling causality via attn_mask + KV cache logic
+        )
 
-        attn_scores = F.softmax(attn_scores, dim=-1)
-        attn_scores = self.dropout(attn_scores)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, T_new, embed_dim)
 
-        attn_output = (attn_scores @ v).transpose(1, 2)
-        attn_output = attn_output.contiguous().view(batch_size, T_new, embed_dim)
-
-        if need_weights:
-            return attn_output, attn_scores
-        else:
-            return (attn_output, updated_cache)
+        # if need_weights:
+        #     return attn_output, attn_scores
+        # else:
+        return (attn_output, updated_cache)
 
 
 class TransformerBlock(nn.Module):
@@ -424,6 +378,8 @@ class TransformerBlock(nn.Module):
         self.attn = MHSA(self.embed_dim, self.num_heads, dropout=self.drop_rate, device=self.device)
         self.c_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
         self.LN2 = nn.LayerNorm(self.embed_dim)
+
+        self.register_buffer('_load_balance_placeholder', torch.tensor([0.0], dtype=torch.float32))
 
         if self.use_MoE:
             self.num_experts = num_experts
@@ -448,25 +404,15 @@ class TransformerBlock(nn.Module):
                 LoRA_module=None):
         B, N_t, t_dim = x.shape
         x_norm = self.LN1(x)
-        load_balance = 0.0#torch.tensor(0.0, dtype=torch.float32, device=self.device)  # place holder
 
-        if past_kv is None:
-            need_causal = True
-        elif N_t == 1:
-            need_causal = False  # single-token decode step, never needs causal mask
-        else:
-            # past_kv exists and N_t > 1 (prefill into cache)
-            seq_len_val = past_kv["seq_len"]
-            if isinstance(seq_len_val, torch.Tensor):
-                seq_len_val = seq_len_val.item()  # only happens outside graph capture
-            need_causal = (seq_len_val == 0)
-        mask_ = self.generate_mask(N_t) if need_causal else None
+        # need_causal = (past_kv is None) or (past_kv is not None and past_kv["seq_len"] == 0 and N_t > 1)
+        # mask_ = self.generate_mask(N_t) if need_causal else None
 
         attn_out, kv_mhsa = self.attn(
                                 x_norm,
                                 key_padding_mask=padding_mask,
                                 need_weights=need_weights,
-                                attn_mask=mask_,
+                                attn_mask=None,
                                 past_kv=past_kv, rope=rope, LoRA_module=LoRA_module)
 
         delta_proj = LoRA_module.forward_proj(attn_out) if LoRA_module is not None else 0.0
@@ -501,7 +447,7 @@ class ECAL_GPT(nn.Module):
                 use_MoE=False, num_experts: int = 2, material_list: list  = ["G4_W_gamma", "G4_Ta_gamma"],
                 particle_list: list = ["gamma"], base_model_type: str = "gamma",
                 device: str ='cuda',
-                grid_shape=(30,30,30),
+                grid_shape=None,
                 LoRA_alpha: int =2,
                 LoRA_r: int =16,
                 enable_head_LoRA: bool = False, # Q,K,V and c_proj in MHSA/CA 
@@ -510,8 +456,7 @@ class ECAL_GPT(nn.Module):
                 vocab_LoRA_scale: int = 1, # Scale factor for vocab LoRA rank
                 enable_embedding_adapter = False, # Embedding adapter modules for token and energy embeddings
                 use_RoPE: bool = True,
-                is_expanded: bool = False, base_seq_len: int = 1800, # hard base seq len for pre-trained models, only relevant if is_expanded is True
-                rope_fraction: float = 0.5, theta: int = 1000
+                is_expanded: bool = False, base_seq_len: int = 1800 # hard base seq len for pre-trained models, only relevant if is_expanded is True
                 ):
         super().__init__()
         self.base_seq_len = base_seq_len # Store base_seq_len for reference in LPE expansion
@@ -524,8 +469,6 @@ class ECAL_GPT(nn.Module):
         self.use_MoE = use_MoE
         self.base_model_type = base_model_type
         self.is_expanded = is_expanded
-        self.theta = theta
-        self.rope_fraction = rope_fraction
 
         # Fine Tune params
         self.learnable_vocabs = learnable_vocabs
@@ -570,23 +513,22 @@ class ECAL_GPT(nn.Module):
             self.energy_pos_embedding = nn.Embedding(seq_len, embed_dim)
             print(self.rope)
         else:
-            print(f"Using Partial RoPE. Theta={self.theta}, fraction = {self.rope_fraction}")
-            #self.rope = RotaryEmbedding(dim = self.embed_dim // self.attn_heads[0],
-            #                            cache_if_possible = True,
-            #                            theta = 1000)
-            self.rope = PartialRoPE(embed_dim = self.embed_dim,
-                                    num_heads = self.attn_heads[0], # Same for all blocks
-                                    theta = self.theta,
-                                    rope_fraction = self.rope_fraction)
+            print("Using RoPE. Theta=4000")
+            self.rope = RotaryEmbedding(dim = self.embed_dim // self.attn_heads[0],
+                                        cache_if_possible = True,
+                                        theta = 4000)
             print(self.rope)
 
         # Add in 3D positional embeddings if provided
         self.grid_shape = grid_shape
         if grid_shape is not None:
-            print("Using 3D positional embeddings.")
             Nz, Ny, Nx = grid_shape
             self.Nz, self.Ny, self.Nx = Nz, Ny, Nx
             num_cells = Nz * Ny * Nx
+
+            self.x_embedding = nn.Embedding(Nx, embed_dim)
+            self.y_embedding = nn.Embedding(Ny, embed_dim)
+            self.z_embedding = nn.Embedding(Nz, embed_dim)
 
             # Precompute mapping tokens -> (z,y,x)
             # token ids occupy [1, num_cells], 0 is SOS, num_cells+1 is EOS, num_cells+2 is PAD
@@ -609,6 +551,10 @@ class ECAL_GPT(nn.Module):
             self.register_buffer('tok2x', tok2x)
             self.register_buffer('tok2y', tok2y)
             self.register_buffer('tok2z', tok2z)
+        else:
+            self.x_embedding = None
+            self.y_embedding = None
+            self.z_embedding = None
         
         self.__init_layers()
 
@@ -621,14 +567,6 @@ class ECAL_GPT(nn.Module):
         self.EOS_energy_token = energy_vocab - 2  
         self.energy_pad_token = energy_vocab - 1 
 
-        if self.is_expanded:
-            self.__build_LPE_expansion(self.seq_len)  # seq_len is updated value
-            self.pos_embedding = nn.Embedding(self.base_seq_len, embed_dim)  # Re-initialize positional embeddings for base dims
-            self.energy_pos_embedding = nn.Embedding(self.base_seq_len, embed_dim)
-        else:
-            self.lpe_expansion_pos = None  # Placeholder for LPE expansion modules
-            self.lpe_expansion_energy = None
-
         # Compilation flag
         self._skip_compile = False
 
@@ -636,6 +574,15 @@ class ECAL_GPT(nn.Module):
         """Disable torch.compile (needed for quantization compatibility)."""
         self._skip_compile = skip
         self._compiled_decode = None
+
+    def __build_LoRA_modules(self,energy_vocab=False):
+        if self.is_expanded:
+            self.__build_LPE_expansion(self.seq_len)  # seq_len is updated value
+            self.pos_embedding = nn.Embedding(self.base_seq_len, embed_dim)  # Re-initialize positional embeddings for base dims
+            self.energy_pos_embedding = nn.Embedding(self.base_seq_len, embed_dim)
+        else:
+            self.lpe_expansion_pos = None  # Placeholder for LPE expansion modules
+            self.lpe_expansion_energy = None
 
     def __build_LPE_expansion(self,new_seq_len,pos_weight=None,energy_weight=None):
         self.lpe_expansion_pos = LPE_Expansion(self.embed_dim, new_seq_len,weight=pos_weight)
@@ -727,7 +674,7 @@ class ECAL_GPT(nn.Module):
     def _get_compiled_decode(self):
         if self._skip_compile:
             return self.forward_decode_step
-
+        
         if self._compiled_decode is None:
             self._compiled_decode = torch.compile(
                 self.forward_decode_step,
@@ -769,9 +716,7 @@ class ECAL_GPT(nn.Module):
             cache_list.append({
                 'k': cache_k,
                 'v': cache_v,
-                'rope_offset': torch.tensor(0, dtype=torch.long, device=device),
-                'seq_len': torch.tensor(0, dtype=torch.long, device=device),
-                'positions': torch.arange(max_len, dtype=torch.long, device=device)
+                'seq_len': 0  # Tracks how many tokens are cached
             })
         
         return cache_list
@@ -796,14 +741,14 @@ class ECAL_GPT(nn.Module):
             # Token buffers
             'idx_buffer': torch.zeros(batch_size, max_len + 1, dtype=torch.long, device=device),
             'e_buffer': torch.zeros(batch_size, max_len + 1, dtype=torch.long, device=device),
-
+            
             # Intermediate embedding buffers
             'tok_embed': torch.zeros(batch_size, 1, self.embed_dim, dtype=dtype, device=device),
             'pos_embed': torch.zeros(batch_size, 1, self.embed_dim, dtype=dtype, device=device),
             'e_embed': torch.zeros(batch_size, 1, self.embed_dim, dtype=dtype, device=device),
             'e_pos_embed': torch.zeros(batch_size, 1, self.embed_dim, dtype=dtype, device=device),
             }
-
+        
         return buffers
 
     def extend_sequence_length(self, new_seq_len):
@@ -939,10 +884,24 @@ class ECAL_GPT(nn.Module):
             print("Skipping new head initialization.")
             
 
-    def embed_space_tokens(self, idx):
-        z_value = self.tok2z[idx].float() / self.Nz  
-        # z_value = z_value * self.embed_dim ** -0.5  # Scale by embedding dimension
-        return z_value.unsqueeze(-1).expand(-1, -1, self.embed_dim)  # Broadcast to [B, T, E]
+    def embed_space_tokens(self, idx, pos_idx):
+        tok_emb = self.token_embedding(idx)
+        pos_emb = self.pos_embedding(pos_idx)
+
+        if self.x_embedding is None:
+            # No 3D embeddings
+            return tok_emb + pos_emb
+        
+        # Map tokens -> z,y,x indices via precomputed lookup
+        x_coord = self.tok2x[idx]
+        y_coord = self.tok2y[idx]
+        z_coord = self.tok2z[idx]
+
+        x_emb = self.x_embedding(x_coord)
+        y_emb = self.y_embedding(y_coord)
+        z_emb = self.z_embedding(z_coord)
+
+        return tok_emb + pos_emb + x_emb + y_emb + z_emb
 
     def forward(self, x, e, initial_energy, material_index,padding_mask=None,particle_type="gamma"):
         seq_len = x.shape[1]
@@ -958,7 +917,7 @@ class ECAL_GPT(nn.Module):
             if self.lpe_expansion_energy is not None: # Continually expanded
                 e_embed = e_embed + self.lpe_expansion_energy(pos)
             else: # Base
-                e_embed = e_embed + self.energy_pos_embedding(pos)
+                e_embed = e_embed + self.energy_pos_embedding(pos) 
 
         e_embed = self.embedding_adapter[particle_type][1](e_embed) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_embed
 
@@ -976,9 +935,6 @@ class ECAL_GPT(nn.Module):
         initial_energy_embed = self.init_e_adapter[particle_type](initial_energy_embed) if (hasattr(self, 'init_e_adapter') and particle_type in self.init_e_adapter) else initial_energy_embed
 
         # Apply adaptations to embeddings if applicable
-        if self.grid_shape is not None:
-            xyz_embed = self.embed_space_tokens(x)
-
         if not self.use_RoPE:
             if self.lpe_expansion_pos is not None: # Continually expanded
                 x = self.token_embedding(x) + self.lpe_expansion_pos(pos)
@@ -986,9 +942,6 @@ class ECAL_GPT(nn.Module):
                 x = self.token_embedding(x) + self.pos_embedding(pos)
         else:
             x = self.token_embedding(x)
-
-        if self.grid_shape is not None:
-            x = x + xyz_embed
         
         x = self.embedding_adapter[particle_type][0](x) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else x
 
@@ -1001,6 +954,7 @@ class ECAL_GPT(nn.Module):
             energy_mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=x.device)  # No masking for kinematic tokens
             padding_mask = torch.cat((energy_mask, padding_mask), dim=1)
 
+        lora_modules = self._get_lora_modules_for_particle(particle_type)
         load_balance = x.new_zeros(())  
 
         for i, layer in enumerate(self.layers):
@@ -1025,24 +979,24 @@ class ECAL_GPT(nn.Module):
         return pixel, e_out, load_balance
 
 
-    def _get_lora_modules_for_particle(self, particle_type):
-        """Pre-compute LoRA module list to avoid repeated lookups in generate loops."""
-        if not hasattr(self, 'particle_lora') or particle_type not in self.particle_lora:
-            return [None] * len(self.layers)
-
-        lora_list = self.particle_lora[particle_type]
-        if not isinstance(lora_list, (list, nn.ModuleList)):
-            return [None] * len(self.layers)
-
-        return [lora_list[i] if i < len(lora_list) and lora_list[i] is not None else None
-                for i in range(len(self.layers))]
-
     def __topK(self, logits, topK=50):
         topk_logits, topk_indices = torch.topk(logits, k=topK, dim=-1)
         probs = torch.softmax(topk_logits, dim=-1)
         sampled = torch.multinomial(probs, num_samples=1)
         idx_next = topk_indices.gather(-1, sampled)
         return idx_next
+
+    def _get_lora_modules_for_particle(self, particle_type):
+        """Pre-compute LoRA module list to avoid repeated lookups."""
+        if not hasattr(self, 'particle_lora') or particle_type not in self.particle_lora:
+            return [None] * len(self.layers)
+        
+        lora_list = self.particle_lora[particle_type]
+        if not isinstance(lora_list, (list, nn.ModuleList)):
+            return [None] * len(self.layers)
+        
+        return [lora_list[i] if i < len(lora_list) and lora_list[i] is not None else None 
+                for i in range(len(self.layers))]
 
     def __min_p(self, logits, min_p=0.05, min_tokens_to_keep=50, return_logits=False):
         assert 0 <= min_p <= 1, "min_p must be between 0 and 1"
@@ -1067,7 +1021,7 @@ class ECAL_GPT(nn.Module):
             return sample_token, min_p_logits
         return sample_token
 
-    def __nucleus(self, logits, p=0.95):
+    def __nucleus(self, logits, p=0.9):
         sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
         probs = torch.softmax(sorted_logits, dim=-1)
         cumsum_probs = torch.cumsum(probs, dim=-1)
@@ -1087,34 +1041,38 @@ class ECAL_GPT(nn.Module):
     def __linear_dynamic_temp(self, step, max_length, max_temp=1.0, min_temp=0.95):
         return max(max_temp - step / max_length, min_temp)
 
-    def __decreasing_linear_temp(self, step, max_length, max_temp=1.05, min_temp=0.95):
-        return max(min_temp, max_temp - (max_temp - min_temp) * (step / max_length))
-
     def __exp_dynamic_temp(self, step, max_length, max_temp=1.05, min_temp=0.95):
         alpha = (max_temp - min_temp)
         decay_rate = -math.log(1e-2) / max_length  
         temperature = min_temp + alpha * math.exp(-decay_rate * step)
         return temperature
 
+    def gumbel_sample(self, logits, temperature=1.0, noise_buffer=None):
+        """
+        Fast sampling using Gumbel-max trick.
+        Uses pre-allocated noise buffer if provided.
+        """
+        if temperature == 0:
+            return torch.argmax(logits, dim=-1, keepdim=True)
+        
+        if noise_buffer is not None:
+            # In-place: fill buffer with uniform random, then transform to Gumbel
+            noise_buffer.uniform_().clamp_(min=1e-8)
+            torch.log(noise_buffer, out=noise_buffer)
+            noise_buffer.neg_()
+            noise_buffer.clamp_(min=1e-8)
+            torch.log(noise_buffer, out=noise_buffer)
+            noise_buffer.neg_()
+            gumbel = noise_buffer
+        else:
+            # Fallback: allocate new tensor
+            u = torch.rand_like(logits).clamp_(min=1e-8)
+            gumbel = -torch.log(-torch.log(u))
+        
+        return torch.argmax(logits / temperature + gumbel, dim=-1, keepdim=True)
+
     def __increasing_linear_temp(self, step, max_length, max_temp=1.2, min_temp=1.0):
         return min(max_temp, min_temp + (max_temp - min_temp) * (step / max_length))
-
-    def __increasing_sigmoid_temp(self, step, max_length, max_temp=1.2, min_temp=1.0, k=10.0, center=0.6):
-        """
-        k: Steepness of the curve. Higher k = faster transition.
-        center: The point (0.0 to 1.0) where the temperature is exactly (min+max)/2.
-        """
-        # Normalize the current step to [0, 1]
-        progress = step / max_length
-        
-        # Sigmoid logic: 1 / (1 + exp(-k * (x - x0)))
-        # This replaces the linear (step / max_length) term
-        sigmoid_ratio = 1 / (1 + math.exp(-k * (progress - center)))
-        
-        # Map the [0, 1] sigmoid output to the [min_temp, max_temp] range
-        temp = min_temp + (max_temp - min_temp) * sigmoid_ratio
-        
-        return min(max_temp, max(min_temp, temp))
 
     def __increasing_exp_temp(self, step, max_length, max_temp=1.2, min_temp=1.0):
         alpha = (max_temp - min_temp)
@@ -1125,11 +1083,10 @@ class ECAL_GPT(nn.Module):
     @torch.inference_mode()
     def generate(self, initial_energy, material_index, max_seq_len=2100,
                 context_len=None, temperature: float = 1.0, method="Default",
-                topK=100, nucleus_p=0.95, dynamic_temp=False, use_kv_cache=True,
-                particle_type="gamma",compiled_decode=False):
-
+                topK=100, nucleus_p=0.95, dynamic_temp=False, use_kv_cache=True,particle_type="gamma",compiled_decode=False):
+        
         lora_modules = self._get_lora_modules_for_particle(particle_type)
-
+        
         device = self.device
         B = initial_energy.shape[0]
 
@@ -1156,15 +1113,19 @@ class ECAL_GPT(nn.Module):
         # Token sampling buffers
         idx_next_buffer = torch.zeros((B, 1), device=device, dtype=torch.long)
         e_next_buffer = torch.zeros((B, 1), device=device, dtype=torch.long)
-
+        
         # Store buffers (avoid .clone() each step)
         idx_store_buffer = torch.zeros(B, device=device, dtype=torch.long)
         e_store_buffer = torch.zeros(B, device=device, dtype=torch.long)
-
+        
         # Mask buffers
         newly_done_buffer = torch.zeros(B, dtype=torch.bool, device=device)
         pad_mask_buffer = torch.zeros(B, dtype=torch.bool, device=device)
         eos_mask_buffer = torch.zeros(B, dtype=torch.bool, device=device)
+        
+        # Gumbel noise buffers (if using gumbel sampling)
+        gumbel_pixel_buffer = torch.zeros((B, self.space_vocab), device=device, dtype=torch.float32)
+        gumbel_energy_buffer = torch.zeros((B, self.energy_vocab), device=device, dtype=torch.float32)
 
         if use_amp:
             autocast_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype)
@@ -1193,7 +1154,11 @@ class ECAL_GPT(nn.Module):
 
                 # Adjust temperature if dynamic
                 if dynamic_temp:
+                    # temperature = self.__linear_dynamic_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
                     temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
+                    # temperature = self.__increasing_exp_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
+                    # temperature = self.__exp_dynamic_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
+                    #print(f"Step {step}: temperature={temperature:.4f}")
 
                 if use_kv_cache:
                     if step == 0:
@@ -1201,22 +1166,18 @@ class ECAL_GPT(nn.Module):
                         idx_buffer[:, 0] = self.SOS_token
                         pos_idx_buffer.fill_(step)
 
-                        sos_embed = self.token_embedding(idx_buffer[:, 0:1])
-
+                        sos_embed = self.token_embedding(idx_buffer[:, 0:1]) 
+                        
                         if not self.use_RoPE:
                             if self.lpe_expansion_pos is not None: # Continually expanded
                                 sos_embed = sos_embed + self.lpe_expansion_pos(pos_idx_buffer)
                             else: # Base
                                 sos_embed = sos_embed + self.pos_embedding(pos_idx_buffer)
 
-                        if self.grid_shape is not None:
-                            xyz_embed = self.embed_space_tokens(idx_buffer[:, 0:1])
-                            sos_embed = sos_embed + xyz_embed
-
                         sos_embed = self.embedding_adapter[particle_type][0](sos_embed) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else sos_embed
-
+                        
                         x_t = torch.cat([init_e_embed, sos_embed], dim=1)
-
+                        
                         if self.digitize_energy:
                             e_buffer[:, 0] = 0
                             e_sos = self.energy_embedding(e_buffer[:, 0:1])
@@ -1224,23 +1185,23 @@ class ECAL_GPT(nn.Module):
                                 e_sos = e_sos + self.energy_pos_embedding(pos_idx_buffer)
                         else:
                             e_buffer[:, 0] = 0.0
-                            e_sos = self.energy_embedding(e_buffer[:, 0:1].reshape(-1, 1)).view(B, 1, -1)
+                            e_sos = self.energy_embedding(e_buffer[:, 0:1].reshape(-1, 1)).view(B, 1, -1) 
 
                         if not self.use_RoPE:
                             if self.lpe_expansion_energy is not None: # Continually expanded
                                 e_sos = e_sos + self.lpe_expansion_energy(pos_idx_buffer)
                             else: # Base
                                 e_sos = e_sos + self.energy_pos_embedding(pos_idx_buffer)
-
+                        
                         # Adapter on embeddings if avail
                         e_sos = self.embedding_adapter[particle_type][1](e_sos) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else e_sos
-                        e_t = torch.cat([init_e_embed, e_sos], dim=1)
-
+                        e_t = torch.cat([init_e_embed, e_sos ], dim=1)
+                        
                     else:
                         # SUBSEQUENT STEPS: [B, 1, E]
                         pos_idx_buffer.fill_(step)
-
-                        x_t = self.token_embedding(idx_buffer[:, step:step+1])
+                        
+                        x_t = self.token_embedding(idx_buffer[:, step:step+1]) 
 
                         if not self.use_RoPE:
                             if self.lpe_expansion_pos is not None: # Continually expanded
@@ -1248,13 +1209,9 @@ class ECAL_GPT(nn.Module):
                             else: # Base
                                 x_t = x_t + self.pos_embedding(pos_idx_buffer)
 
-                        if self.grid_shape is not None:
-                            xyz_embed = self.embed_space_tokens(idx_buffer[:, step:step+1])
-                            x_t = x_t + xyz_embed
-
                         # Adapter on embeddings if avail
                         x_t = self.embedding_adapter[particle_type][0](x_t) if (hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter) else x_t
-
+                        
                         if self.digitize_energy:
                             e_t = self.energy_embedding(e_buffer[:, step:step+1])
                             if not self.use_RoPE:
@@ -1281,8 +1238,8 @@ class ECAL_GPT(nn.Module):
                     )
 
                     # Either Vocab LoRA / new head or base model head
-                    energy_logits = self.vocab_LoRA[particle_type][1](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.energy_head(h_t)[:, -1, :]
-                    pixel_logits = self.vocab_LoRA[particle_type][0](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.logits_head(h_t)[:, -1, :]
+                    energy_logits = self.vocab_LoRA[particle_type][1](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.energy_head(h_t)[:, -1, :]  
+                    pixel_logits = self.vocab_LoRA[particle_type][0](h_t)[:, -1, :] if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.logits_head(h_t)[:, -1, :]    
                     energy_logits = energy_logits / temperature
                     pixel_logits = pixel_logits / temperature
                 else:
@@ -1297,7 +1254,7 @@ class ECAL_GPT(nn.Module):
                         current_idx = idx_buffer[:, :step+1].contiguous()
                         current_e = e_buffer[:, :step+1].contiguous()
 
-                    pixel_all, e_out_all, _ = self.forward(current_idx, current_e, initial_energy, material_index, padding_mask=None, particle_type=particle_type)
+                    pixel_all, e_out_all = self.forward(current_idx, current_e, initial_energy, material_index, padding_mask=None, particle_type=particle_type)
 
                     pixel_logits = pixel_all[:, -1, :] / temperature
                     if self.digitize_energy:
@@ -1307,33 +1264,35 @@ class ECAL_GPT(nn.Module):
 
                 # Sample tokens
                 if method == "Default":
-                    probs = F.softmax(pixel_logits, dim=-1)
-                    idx_next = torch.multinomial(probs, num_samples=1)
-                elif method == "TopK":
-                    idx_next = self.__topK(pixel_logits, topK)
-                elif method == "Nucleus":
-                    idx_next = self.__nucleus(pixel_logits, nucleus_p)
+                    idx_next = self.gumbel_sample(pixel_logits, temperature, noise_buffer=gumbel_pixel_buffer)
                 elif method == "Greedy":
-                    idx_next = torch.argmax(pixel_logits, dim=-1, keepdim=True)
-                elif method == "Min_p":
-                    idx_next = self.__min_p(pixel_logits)
+                    torch.argmax(pixel_logits, dim=1, keepdim=True, out=idx_next_buffer)
+                    idx_next = idx_next_buffer
+                else:
+                    if method == "TopK":
+                        idx_next = self.__topK(pixel_logits, topK)
+                    elif method == "Nucleus":
+                        idx_next = self.__nucleus(pixel_logits, nucleus_p)
+                    elif method == "Min_p":
+                        idx_next = self.__min_p(pixel_logits)
 
                 if self.digitize_energy:
-                    probs_t = F.softmax(energy_logits, dim=-1, dtype=torch.float32)
                     if method == "Default":
-                        e_next = torch.multinomial(probs_t, num_samples=1)
-                    elif method == "TopK":
-                        e_next = self.__topK(energy_logits, topK)
-                    elif method == "Nucleus":
-                        e_next = self.__nucleus(energy_logits, nucleus_p)
+                        e_next = self.gumbel_sample(energy_logits, temperature, noise_buffer=gumbel_energy_buffer)
                     elif method == "Greedy":
-                        e_next = torch.argmax(energy_logits, dim=-1, keepdim=True)
+                        torch.argmax(energy_logits, dim=-1, keepdim=True, out=e_next_buffer)
+                        e_next = e_next_buffer
                     else:
-                        e_next = self.__min_p(energy_logits)
+                        if method == "TopK":
+                            e_next = self.__topK(energy_logits, topK)
+                        elif method == "Nucleus":
+                            e_next = self.__nucleus(energy_logits, nucleus_p)
+                        else:
+                            e_next = self.__min_p(energy_logits)
                 else:
                     e_next = energy_val.unsqueeze(1)
 
-                # EOS handling — in-place buffer ops to avoid allocations
+                # EOS handling
                 if self.digitize_energy:
                     # Compute masks in-place
                     torch.eq(e_next.squeeze(1), self.EOS_energy_token, out=newly_done_buffer)
@@ -1345,7 +1304,7 @@ class ECAL_GPT(nn.Module):
                 eos_mask_buffer.copy_(newly_done_buffer)
                 is_done.logical_or_(newly_done_buffer)
 
-                # Store tokens — masked_fill_ avoids .clone()
+                # Store tokens
                 idx_store_buffer.copy_(idx_next.squeeze(1))
                 idx_store_buffer.masked_fill_(eos_mask_buffer, self.EOS_token)
                 idx_store_buffer.masked_fill_(pad_mask_buffer, self.pad_token)
@@ -1363,7 +1322,6 @@ class ECAL_GPT(nn.Module):
                         e_store_buffer[pad_mask_buffer] = e_buffer[:, step][pad_mask_buffer]
                     e_buffer[:, step + 1] = e_store_buffer
 
-                # Early-exit: check every 200 steps or near the end (avoids sync overhead each step)
                 if step > max_seq_len - 200 or (step + 1) % 200 == 0:
                     if is_done.all():
                         actual_len = step + 2
@@ -1380,8 +1338,7 @@ class ECAL_GPT(nn.Module):
             e_t: [B, T_new, E] where T_new=2 on first step, 1 after
             kv_caches: List of cache dicts, one per layer
             is_first_step: True only on step 0
-            lora_modules: Pre-computed list of LoRA modules (avoids per-step dict lookup)
-
+        
         Returns:
             h_t: [B, 1, E] - output for newest position only
             updated_caches: List of updated cache dicts
@@ -1389,42 +1346,39 @@ class ECAL_GPT(nn.Module):
         if kv_caches is None:
             kv_caches = [None] * len(self.layers)
 
-        if lora_modules is None:
-            lora_modules = self._get_lora_modules_for_particle(particle_type)
-
         x = x_t
         e = e_t
         new_caches = []
-
+        
         for i, (layer, cache, lora_mod) in enumerate(zip(self.layers, kv_caches, lora_modules)):
             if isinstance(layer, CATransformerBlock):
                 x, updated_cache, _lb = layer(
                     x, e, material_index,
                     padding_mask=padding_mask,
-                    past_kv=cache, rope=self.rope, LoRA_module=lora_mod
+                    past_kv=cache,rope=self.rope,LoRA_module=lora_mod
                 )
                 new_caches.append(updated_cache)
             else:
                 x, updated_cache, _lb = layer(
                     x, material_index,
                     padding_mask=padding_mask,
-                    past_kv=cache, rope=self.rope, LoRA_module=lora_mod
+                    past_kv=cache,rope=self.rope,LoRA_module=lora_mod
                 )
                 new_caches.append(updated_cache)
 
         x = self.LN(x)
-
+        
         # Ensure output is [B, 1, E]
         x = x[:, -1:, :]
-
+        
         return x, new_caches
-
+    
     def forward_decode_step_static(self, buffers, kv_caches, seq_len, material_index,
                                    particle_type="gamma", lora_modules=None):
         """
         Static decode step that only uses pre-allocated buffers.
         No dynamic tensor creation - suitable for CUDA graph capture.
-
+        
         Args:
             buffers: Dict of pre-allocated static buffers
             kv_caches: List of KV cache dicts
@@ -1439,63 +1393,50 @@ class ECAL_GPT(nn.Module):
             lora_modules = [None] * len(self.layers)
 
         for i, (layer, cache, lora_mod) in enumerate(zip(self.layers, kv_caches, lora_modules)):
+            # Update cache seq_len before forward pass
+            cache['seq_len'] = seq_len
 
             if isinstance(layer, CATransformerBlock):
                 x, _, _lb = layer(
                     x, e, material_index,
                     padding_mask=None,
                     past_kv=cache,
-                    LoRA_module=lora_mod,
-                    rope=self.rope
+                    LoRA_module=lora_mod
                 )
             else:
                 x, _, _lb = layer(
                     x, material_index,
                     padding_mask=None,
                     past_kv=cache,
-                    LoRA_module=lora_mod,
-                    rope=self.rope
+                    LoRA_module=lora_mod
                 )
-
+        
         x = self.LN(x)
 
         # Write to output buffer in-place
         buffers['h_out'].copy_(x[:, -1:, :])
 
         # Compute logits in place
-        h_last = buffers['h_out']
+        h_last = buffers['h_out'].squeeze(1)
+
+        delta_pixel = self.vocab_LoRA[particle_type][0](buffers['h_out']).squeeze(1) \
+            if (hasattr(self, 'vocab_LoRA') and  particle_type in self.vocab_LoRA) else 0.0
+        buffers['pixel_logits'].copy_(self.logits_head(h_last) + delta_pixel)
 
         if hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA:
-            buffers['pixel_logits'].copy_(self.vocab_LoRA[particle_type][0](h_last).squeeze(1))
-            buffers['energy_logits'].copy_(self.vocab_LoRA[particle_type][1](h_last).squeeze(1))
-        else:
-            buffers['pixel_logits'].copy_(self.logits_head(h_last).squeeze(1))
-            buffers['energy_logits'].copy_(self.energy_head(h_last).squeeze(1))
+            buffers['pixel_logits'].copy_(
+                self.vocab_LoRA[particle_type][0].apply_product(buffers['pixel_logits'])
+            )
+        
+        if self.digitize_energy:
+            delta_e = self.vocab_LoRA[particle_type][1](buffers['h_out']).squeeze(1) \
+                if (hasattr(self, 'vocab_LoRA') and  particle_type in self.vocab_LoRA) else 0.0
+            buffers['energy_logits'].copy_(self.energy_head(h_last) + delta_e)
 
-
-    def gumbel_sample(self, logits, temperature=1.0, noise_buffer=None):
-        """
-        Fast sampling using Gumbel-max trick.
-        Uses pre-allocated noise buffer if provided.
-        """
-        if temperature == 0:
-            return torch.argmax(logits, dim=-1, keepdim=True)
-
-        if noise_buffer is not None:
-            # In-place: fill buffer with uniform random, then transform to Gumbel
-            noise_buffer.uniform_().clamp_(min=1e-8)
-            torch.log(noise_buffer, out=noise_buffer)
-            noise_buffer.neg_()
-            noise_buffer.clamp_(min=1e-8)
-            torch.log(noise_buffer, out=noise_buffer)
-            noise_buffer.neg_()
-            gumbel = noise_buffer
-        else:
-            # Fallback: allocate new tensor
-            u = torch.rand_like(logits).clamp_(min=1e-8)
-            gumbel = -torch.log(-torch.log(u))
-
-        return torch.argmax(logits / temperature + gumbel, dim=-1, keepdim=True)
+            if hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA:
+                buffers['energy_logits'].copy_(
+                    self.vocab_LoRA[particle_type][1].apply_product(buffers['energy_logits'])
+                )
 
     @torch.inference_mode()
     def generate_with_cuda_graph(
@@ -1504,33 +1445,27 @@ class ECAL_GPT(nn.Module):
         material_index,
         max_seq_len=2100,
         temperature: float = 1.0,
-        particle_type="gamma",
-        dynamic_temp=False,
+        particle_type="gamma"
     ):
         """
         Generation using CUDA graphs for maximum inference speed.
         """
-
         lora_modules = self._get_lora_modules_for_particle(particle_type)
 
         device = self.device
         B = initial_energy.shape[0]
-        dtype = AMP_DTYPE if device == "cuda" else torch.float32
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
         if initial_energy.dim() == 1:
             initial_energy = initial_energy.unsqueeze(1)
-
+        
         # Allocate all static buffers
         buffers = self._allocate_static_buffers(B, max_seq_len, device, dtype)
         kv_caches = self._allocate_kv_cache(B, max_seq_len + 2, device, dtype)
-
+        
         # Pre-compute initial energy embedding (used every step for CA)
         init_e_embed = self.initial_energy_embedding(initial_energy).unsqueeze(1).to(dtype)
-
-        # Precompute RoPE frequencies for all positions (CUDA-graph-safe)
-        if self.rope is not None:
-            self.rope.precompute_freqs(max_seq_len + 2, device=device, dtype=dtype)
-
+        
         is_done = torch.zeros(B, dtype=torch.bool, device=device)
 
         has_embed_adapter = hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter
@@ -1540,203 +1475,168 @@ class ECAL_GPT(nn.Module):
         with torch.amp.autocast('cuda', dtype=dtype):
             buffers['idx_buffer'][:, 0] = self.SOS_token
             buffers['e_buffer'][:, 0] = 0
-
+            
             buffers['pos_idx'].zero_()
-
+            
             # Compute embeddings for first step
-            sos_embed = self.token_embedding(buffers['idx_buffer'][:, 0:1])
-            if not self.use_RoPE:
-                _pos_src = self.lpe_expansion_pos if self.lpe_expansion_pos is not None else self.pos_embedding
-                sos_embed = sos_embed + _pos_src(buffers['pos_idx'])
+            sos_embed = (self.token_embedding(buffers['idx_buffer'][:, 0:1]) + 
+                        self.pos_embedding(buffers['pos_idx']))
             if has_embed_adapter:
                 sos_embed = self.embedding_adapter[particle_type][0](sos_embed)
-
-            e_sos = self.energy_embedding(buffers['e_buffer'][:, 0:1])
-            if not self.use_RoPE:
-                _e_pos_src = self.lpe_expansion_energy if self.lpe_expansion_energy is not None else self.energy_pos_embedding
-                e_sos = e_sos + _e_pos_src(buffers['pos_idx'])
+            
+            e_sos = (self.energy_embedding(buffers['e_buffer'][:, 0:1]) + 
+                    self.energy_pos_embedding(buffers['pos_idx']))
             if has_embed_adapter:
                 e_sos = self.embedding_adapter[particle_type][1](e_sos)
-
+            
             # First step: [init_e, sos] -> shape [B, 2, E]
             x_first = torch.cat([init_e_embed, sos_embed], dim=1)
             e_first = torch.cat([init_e_embed, e_sos], dim=1)
-
+            
             # Run first step without graph (shape is [B, 2, E])
             for i, (layer, cache) in enumerate(zip(self.layers, kv_caches)):
-                cache['seq_len'].fill_(0)  # Will be updated in graph steps
-                lora_mod = lora_modules[i] if lora_modules else None
-
+                cache['seq_len'] = 0
+                lora_mod = None
+                if hasattr(self, 'particle_lora') and particle_type in self.particle_lora:
+                    lora_list = self.particle_lora[particle_type]
+                    if isinstance(lora_list, (list, nn.ModuleList)) and len(lora_list) > 0:
+                        lora_mod = lora_list[i] if lora_list[i] is not None else None
+                
                 if isinstance(layer, CATransformerBlock):
-                    x_first, _, _ = layer(x_first, e_first, material_index,
-                                        padding_mask=None, past_kv=cache, LoRA_module=lora_mod,rope=self.rope)
+                    x_first, _, _ = layer(x_first, e_first, material_index, 
+                                        padding_mask=None, past_kv=cache, LoRA_module=lora_mod)
                 else:
                     x_first, _, _ = layer(x_first, material_index,
-                                        padding_mask=None, past_kv=cache, LoRA_module=lora_mod,rope=self.rope)
-
-            for cache in kv_caches:
-                    cache['seq_len'].fill_(2)  # first step wrote 2 tokens: init_e + sos
-                    cache['rope_offset'].fill_(1) # Ensure RoPE offset is correct for next step
-
+                                        padding_mask=None, past_kv=cache, LoRA_module=lora_mod)
+            
             x_first = self.LN(x_first)
             h_last = x_first[:, -1, :]
-
+            
             # Get first token
-            energy_logits = self.vocab_LoRA[particle_type][1](h_last) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.energy_head(h_last)
-            pixel_logits = self.vocab_LoRA[particle_type][0](h_last) if (hasattr(self, 'vocab_LoRA') and particle_type in self.vocab_LoRA) else self.logits_head(h_last)
-            pixel_logits = pixel_logits / temperature
-            energy_logits = energy_logits / temperature
-
+            pixel_logits = self.logits_head(h_last) / temperature
+            energy_logits = self.energy_head(h_last) / temperature
+            
             idx_next = torch.multinomial(F.softmax(pixel_logits, dim=-1), num_samples=1)
             e_next = torch.multinomial(F.softmax(energy_logits, dim=-1), num_samples=1)
-
+            
             buffers['idx_buffer'][:, 1] = idx_next.squeeze(1)
             buffers['e_buffer'][:, 1] = e_next.squeeze(1)
-
+        
         # ============ WARMUP FOR CUDA GRAPH (steps 1-2) ============
+        # Must be inside autocast to match dtypes
         warmup_stream = torch.cuda.Stream()
         with torch.cuda.stream(warmup_stream):
             with torch.amp.autocast('cuda', dtype=dtype):
                 for warmup_step in range(2):
                     step = warmup_step + 1  # Already did step 0
                     seq_len_for_cache = step + 1  # +1 for init_e_embed
-
+                    
                     buffers['pos_idx'].fill_(step)
-
+                    
+                    # Compute embeddings into static buffers
                     buffers['tok_embed'].copy_(self.token_embedding(buffers['idx_buffer'][:, step:step+1]).to(dtype))
-                    if not self.use_RoPE:
-                        _pos_src = self.lpe_expansion_pos if self.lpe_expansion_pos is not None else self.pos_embedding
-                        buffers['x_t'].copy_(buffers['tok_embed'] + _pos_src(buffers['pos_idx']).to(dtype))
-                    else:
-                        buffers['x_t'].copy_(buffers['tok_embed'], non_blocking=True)
-
+                    buffers['pos_embed'].copy_(self.pos_embedding(buffers['pos_idx']).to(dtype))
+                    buffers['x_t'].copy_(buffers['tok_embed'] + buffers['pos_embed'])
+                    
                     if has_embed_adapter:
                         buffers['x_t'].copy_(self.embedding_adapter[particle_type][0](buffers['x_t']))
-
+                    
                     buffers['e_embed'].copy_(self.energy_embedding(buffers['e_buffer'][:, step:step+1]).to(dtype))
-                    if not self.use_RoPE:
-                        _e_pos_src = self.lpe_expansion_energy if self.lpe_expansion_energy is not None else self.energy_pos_embedding
-                        buffers['e_t'].copy_(buffers['e_embed'] + _e_pos_src(buffers['pos_idx']).to(dtype))
-                    else:
-                        buffers['e_t'].copy_(buffers['e_embed'], non_blocking=True)
-
+                    buffers['e_pos_embed'].copy_(self.energy_pos_embedding(buffers['pos_idx']).to(dtype))
+                    buffers['e_t'].copy_(buffers['e_embed'] + buffers['e_pos_embed'])
+                    
                     if has_embed_adapter:
                         buffers['e_t'].copy_(self.embedding_adapter[particle_type][1](buffers['e_t']))
-
-                    for cache in kv_caches:
-                        cache['seq_len'].fill_(seq_len_for_cache)
-                        cache['rope_offset'].fill_(step)
-
+                    
                     self.forward_decode_step_static(
                         buffers, kv_caches, seq_len_for_cache, material_index, particle_type, lora_modules=lora_modules
                     )
-
+        
         torch.cuda.current_stream().wait_stream(warmup_stream)
-
+        
         # ============ CAPTURE CUDA GRAPH ============
+        # Set up for capture at step index 3
         capture_step = 3
-
+        
         with torch.amp.autocast('cuda', dtype=dtype):
             buffers['pos_idx'].fill_(capture_step)
-
+            
+            # Pre-fill input buffers with dummy data for capture
             buffers['tok_embed'].copy_(self.token_embedding(buffers['idx_buffer'][:, capture_step:capture_step+1]).to(dtype))
-            if not self.use_RoPE:
-                _pos_src = self.lpe_expansion_pos if self.lpe_expansion_pos is not None else self.pos_embedding
-                buffers['x_t'].copy_(buffers['tok_embed'] + _pos_src(buffers['pos_idx']).to(dtype))
-            else:
-                buffers['x_t'].copy_(buffers['tok_embed'])
-
+            buffers['pos_embed'].copy_(self.pos_embedding(buffers['pos_idx']).to(dtype))
+            buffers['x_t'].copy_(buffers['tok_embed'] + buffers['pos_embed'])
+            
             buffers['e_embed'].copy_(self.energy_embedding(buffers['e_buffer'][:, capture_step:capture_step+1]).to(dtype))
-            if not self.use_RoPE:
-                _e_pos_src = self.lpe_expansion_energy if self.lpe_expansion_energy is not None else self.energy_pos_embedding
-                buffers['e_t'].copy_(buffers['e_embed'] + _e_pos_src(buffers['pos_idx']).to(dtype))
-            else:
-                buffers['e_t'].copy_(buffers['e_embed'])
-
-            for cache in kv_caches:
-                cache['seq_len'].fill_(capture_step + 1)
-                cache['rope_offset'].fill_(capture_step) 
-
+            buffers['e_pos_embed'].copy_(self.energy_pos_embedding(buffers['pos_idx']).to(dtype))
+            buffers['e_t'].copy_(buffers['e_embed'] + buffers['e_pos_embed'])
+        
+        # Capture the graph - must also be in autocast
         graph = torch.cuda.CUDAGraph()
         with torch.amp.autocast('cuda', dtype=dtype):
             with torch.cuda.graph(graph):
                 self.forward_decode_step_static(
                     buffers, kv_caches, capture_step + 1, material_index, particle_type, lora_modules
-                ) 
-
-        # print("CUDA graph captured - starting main generation loop")
-
+                )
+        
         # ============ MAIN GENERATION LOOP ============
         with torch.amp.autocast('cuda', dtype=dtype):
             for step in range(1, max_seq_len):
-                # Adjust temperature if dynamic
-                if dynamic_temp:
-                    temperature = self.__increasing_linear_temp(step, max_seq_len, max_temp=1.05, min_temp=0.95)
-
                 seq_len_for_cache = step + 1
-
+                
+                # Update position (Python int copy, not tensor op)
                 buffers['pos_idx'].fill_(step)
-
+                
+                # Compute embeddings (these can't easily be in the graph due to indexing)
                 buffers['tok_embed'].copy_(self.token_embedding(buffers['idx_buffer'][:, step:step+1]).to(dtype))
-                if not self.use_RoPE:
-                    _pos_src = self.lpe_expansion_pos if self.lpe_expansion_pos is not None else self.pos_embedding
-                    buffers['x_t'].copy_(buffers['tok_embed'] + _pos_src(buffers['pos_idx']).to(dtype))
-                else:
-                    buffers['x_t'].copy_(buffers['tok_embed'])
-
+                buffers['pos_embed'].copy_(self.pos_embedding(buffers['pos_idx']).to(dtype))
+                buffers['x_t'].copy_(buffers['tok_embed'] + buffers['pos_embed'])
+                
                 if has_embed_adapter:
                     buffers['x_t'].copy_(self.embedding_adapter[particle_type][0](buffers['x_t']))
-
+                
                 buffers['e_embed'].copy_(self.energy_embedding(buffers['e_buffer'][:, step:step+1]).to(dtype))
-                if not self.use_RoPE:
-                    _e_pos_src = self.lpe_expansion_energy if self.lpe_expansion_energy is not None else self.energy_pos_embedding
-                    buffers['e_t'].copy_(buffers['e_embed'] + _e_pos_src(buffers['pos_idx']).to(dtype))
-                else:
-                    buffers['e_t'].copy_(buffers['e_embed'])
-
-                if has_embed_adapter:
+                buffers['e_pos_embed'].copy_(self.energy_pos_embedding(buffers['pos_idx']).to(dtype))
+                buffers['e_t'].copy_(buffers['e_embed'] + buffers['e_pos_embed'])
+                
+                if hasattr(self, 'embedding_adapter') and particle_type in self.embedding_adapter:
                     buffers['e_t'].copy_(self.embedding_adapter[particle_type][1](buffers['e_t']))
-
+                
                 # Update cache seq_len for all layers
                 for cache in kv_caches:
-                    cache['seq_len'].fill_(seq_len_for_cache)
-                    cache['rope_offset'].fill_(step)
+                    cache['seq_len'] = seq_len_for_cache
+                
                 # Replay the captured graph
                 graph.replay()
-
+                
                 # Sample from logits (outside graph due to randomness)
                 pixel_logits = buffers['pixel_logits'] / temperature
                 energy_logits = buffers['energy_logits'] / temperature
-
+                
                 idx_next = torch.multinomial(F.softmax(pixel_logits, dim=-1, dtype=torch.float32), num_samples=1)
                 e_next = torch.multinomial(F.softmax(energy_logits, dim=-1, dtype=torch.float32), num_samples=1)
-
+                
                 # EOS handling
                 newly_done = (e_next.squeeze(1) == self.EOS_energy_token) | \
                             (idx_next.squeeze(1) == self.EOS_token)
-
+                
                 pad_mask = is_done & ~newly_done
                 eos_mask = newly_done
                 is_done = is_done | newly_done
-
+                
                 # Store tokens
                 idx_store = idx_next.squeeze(1)
                 idx_store.masked_fill_(eos_mask, self.EOS_token)
                 idx_store.masked_fill_(pad_mask, self.pad_token)
                 buffers['idx_buffer'][:, step + 1] = idx_store
-
+                
                 e_store = e_next.squeeze(1)
-                e_store.masked_fill_(eos_mask, self.EOS_energy_token)
-                e_store.masked_fill_(pad_mask, self.energy_pad_token)
+                e_store.masked_fill_(eos_mask, self.EOS_energy_token)    # 25001
+                e_store.masked_fill_(pad_mask, self.energy_pad_token)    # 25002
                 buffers['e_buffer'][:, step + 1] = e_store
-
+                
                 if (step + 1) % 100 == 0:
                     if torch.all(is_done):
                         return (buffers['idx_buffer'][:, :step+2].clone(),
                                 buffers['e_buffer'][:, :step+2].clone())
-
-        if self.rope is not None:
-            self.rope._precomputed_cos = None
-            self.rope._precomputed_sin = None
-
+        
         return buffers['idx_buffer'].clone(), buffers['e_buffer'].clone()
