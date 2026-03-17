@@ -248,17 +248,17 @@ Download the pre-trained foundation model weights:
 
 ```bash
 # Download from Google Drive
-wget "https://drive.google.com/uc?export=download&id=1yCICuNOSbc8MN_c5N61zdswTEUGF9uSX" -O foundation_model.pth
+wget "https://drive.google.com/uc?export=download&id=1yCICuNOSbc8MN_c5N61zdswTEUGF9uSX" -O pretrained.pth
 
 # Or using curl
-curl -L "https://drive.google.com/uc?export=download&id=1yCICuNOSbc8MN_c5N61zdswTEUGF9uSX" -o foundation_model.pth
+curl -L "https://drive.google.com/uc?export=download&id=1yCICuNOSbc8MN_c5N61zdswTEUGF9uSX" -o pretrained.pth
 ```
 
 Place the downloaded `pretrained.pth` file in your `Trained_Models` directory, then reference it in your config:
 
 ```json
 {
-    "model_path": "./foundation_model.pth",
+    "model_path": "./pretrained.pth",
     ...
 }
 ```
