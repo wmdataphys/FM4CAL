@@ -5,6 +5,7 @@
 # Ignore log files
 *.log
 *.txt
+!env.txt
 *.out
 *.prof
 
@@ -15,6 +16,12 @@
 *.h5
 *.csv
 
+
+config/CA_config_copy.json
+config/CA_config_dist_copy.json
+config/CA_config.json
+config/CA_config_dist.json
+config/electron_config.json
 
 # Ignore system files
 .DS_Store
@@ -28,20 +35,27 @@
 # Ignore build folders
 build/
 dist/
+Animations/
 
 # Ignore data folders
 data/
 
+make_split.py
 # ignore config
-config/
-
+# config/
+kube_config/
 # Ignore plotting for now
 plotting/
 Generations/
 outputs/
 *Plots*
+
+# Old Files to ignore
+models/GPT_orig.py
+models/GPT_Backup.py
+
 # Ignore model weights
-Trained_Models/
+*Trained_Models*
 
 # Ignore notebook folders
 notebooks/
@@ -53,11 +67,14 @@ notebook/
 .ipython/
 .local/
 .cache/
+FineTuningStudies/
 
 # --- Generated model outputs / artifacts ---
 ECALGPT_generated/
 val/
 *.pth
+Comparisons/
+
 
 # --- Local scripts & data ---
 init_e_collect.py

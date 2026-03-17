@@ -3,6 +3,41 @@ import h5py
 import torch
 import torch.nn as nn
 
+def singular_value_checks(A, B, r, scale, layer_name, vocab=False,top_k_tokens=10):
+
+    if vocab:
+        W = B @ A
+    else:
+        W = A @ B
+        
+    W = W * scale
+    
+    u, s, vh = torch.linalg.svd(W.float(), full_matrices=False)
+    
+    var = s**2
+    explained_variance = var / var.sum()
+
+    print(f"\n--- Analysis for {layer_name} (Vocab={vocab}) ---")
+    print(f"Top 5 Singular Values: {s[:5].tolist()}")
+    
+    # Check "Effective Rank" usage
+    top_10_percent = max(1, r // 10)
+    variance_top_10 = explained_variance[:top_10_percent].sum().item()
+    print(f"Total variance explained by top 10% of rank ({top_10_percent} dims): {variance_top_10:.2%}")
+
+    if vocab:
+            first_direction_influence = torch.abs(u[:, 0])
+            top_values, top_indices = torch.topk(first_direction_influence, top_k_tokens)
+            
+            print(f"Top {top_k_tokens} Vocab Indices influenced by S1:")
+            for idx, val in zip(top_indices.tolist(), top_values.tolist()):
+                print(f"  Token Index {idx:4d} | Weight: {val:.4f}")
+    
+    # Heuristic for the "Back-to-Front" shift
+    if vocab and variance_top_10 > 0.95:
+        print("Warning: Variance highly collapsed. LoRA is likely acting as a simple scaler, not a complex spatial re-mapper.")
+
+
 def read_text(file_path):
     try:
         with open(file_path, 'r') as file:

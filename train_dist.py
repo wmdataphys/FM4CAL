@@ -1,6 +1,7 @@
 import os
 import sys 
 import gc
+import math 
 
 import torch
 import torch.nn as nn
@@ -33,7 +34,6 @@ warnings.filterwarnings("ignore", message=".*weights_only.*")
 
 def create_model(config,state_dict=None):
     # Model params.
-    # Model params.
     vocab_size = config['model']['vocab_size']
     energy_vocab = config['model']['energy_vocab']
     embed_dim = config['model']['embed_dim']
@@ -45,8 +45,9 @@ def create_model(config,state_dict=None):
     drop_rates = config['model']['drop_rates']
     materials_list = config['material_list']
     num_experts = len(materials_list)
-    use_MoE = bool(config['model']['use_MoE'])
-    digitize_energy = bool(config['digitize_energy'])
+    use_MoE = config['model']['use_MoE']
+    digitize_energy = config['digitize_energy']
+    use_RoPE = config['model']['use_RoPE']
     
     net = ECAL_GPT(vocab_size,
                    msl,
@@ -60,7 +61,8 @@ def create_model(config,state_dict=None):
                 drop_rates=drop_rates,
                 use_MoE=use_MoE,
                 num_experts=num_experts,
-                material_list=materials_list)
+                material_list=materials_list,
+                use_RoPE=use_RoPE)
                 
     if state_dict:
         net.load_state_dict(state_dict)
@@ -81,7 +83,12 @@ class Trainer:
 
         self.use_amp = config['use_amp']
         if self.use_amp:
+            if self.rank == 0:
+                print("Using Automatic Mixed Precision (AMP)")
             self.scaler = GradScaler()
+        else:
+            if self.rank == 0:
+                print("Not using Automatic Mixed Precision (AMP)")
 
         self.use_MoE = bool(config['model']['use_MoE'])
         self.digitize_energy = bool(config['digitize_energy'])
@@ -100,6 +107,7 @@ class Trainer:
             print("========= Special Tokens ============")
             print(f"Pixels - Pad: {self.pad_token}, SOS: {self.SOS_token}, EOS: {self.EOS_token}")
             print(f"Energy   - Pad: {self.energy_pad_token}, SOS: {self.SOS_token}, EOS: {self.energy_EOS_token}")
+            print(f"Max Sequence Length: {self.max_seq_length}")
             print("=====================================")
 
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.pad_token)
@@ -110,7 +118,7 @@ class Trainer:
         self.num_epochs = config['num_epochs']
         # Decrease LR at epoch 1,10,50,75% of total epochs
         # LR goes like Epoch 0:1e-3 -> Epoch 1:1e-4 -> Epoch 50:1e-5 -> Epoch 75:1e-6
-        milestones = [1,int(0.1 * self.num_epochs), int(0.5 * self.num_epochs), int(0.75 * self.num_epochs)]
+        milestones = [5,10,15,20]
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=milestones,gamma=0.1)
         print("Using LR Scheduler with milestones at epochs: ", milestones)
         self.history = {'train_loss': [], 'val_loss': []}
@@ -134,9 +142,10 @@ class Trainer:
             if self.rank == 0:
                 print("Using regression over energy domain.")
 
-    def init_kbar(self,num_files,num_epochs=1):
-        total_samples = num_files * self.config['dataset']['tracks_per_file'] 
-        total_batches = total_samples // self.config['dataloader']['train']['batch_size'] # // self.world_size
+    def init_kbar(self, num_files, num_epochs=1):
+        total_samples = num_files * self.config['dataset']['tracks_per_file'] # 10k per file roughly - overestimation
+        per_gpu_bs = self.config['dataloader']['train']['batch_size'] // self.world_size
+        total_batches = math.ceil((total_samples / self.world_size) / per_gpu_bs)
         self.kbar = pkbar.Kbar(target=total_batches, epoch=self.epoch, num_epochs=num_epochs, width=20)
             
     def load_chunked_dataset(self,file_list,verbose=False):
@@ -147,7 +156,7 @@ class Trainer:
                                        ,verbose=verbose,ordering='energy',global_stats=stats,
                                        material_list=self.material_list)
         sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True)
-        loader = CreateLoaderMoE(dataset, sampler=sampler, batch_size=self.config['dataloader']['train']['batch_size_cls'] // self.world_size,
+        loader = CreateLoaderMoE(dataset, sampler=sampler, batch_size=self.config['dataloader']['train']['batch_size'] // self.world_size,
                                 num_workers=self.config['dataloader']['train']['num_workers'],
                                 pin_memory=False,persistent_workers=False,prefetch_factor=self.config['dataloader']['train']['prefetch_factor'])
         return loader, sampler
@@ -176,7 +185,7 @@ class Trainer:
             self.optimizer.zero_grad()
 
             if self.use_amp:
-                with autocast(dtype=torch.float16):
+                with autocast(dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
                     logits, e, load_balance = self.model(tokens, energies, initial_energy, material_index=material_index, padding_mask=padding_mask)
 
                     logits = logits[:, skip_idx:, :]
@@ -205,17 +214,17 @@ class Trainer:
                 with torch.set_grad_enabled(True):
                     logits, e, load_balance = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask)
 
-                # Slice off the prepended initial energy token
-                logits = logits[:, skip_idx:, :]
-                e = e[:, skip_idx:, :]
+                    # Slice off the prepended initial energy token
+                    logits = logits[:, skip_idx:, :]
+                    e = e[:, skip_idx:, :]
 
-                pixel_loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), next_tokens.reshape(-1))
+                    pixel_loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), next_tokens.reshape(-1))
 
-                if not self.digitize_energy:
-                    regression_mask = ~torch.isin(next_tokens, torch.tensor([self.pad_token, self.SOS_token, self.EOS_token], device=next_tokens.device))
-                    energy_loss = self.energy_loss_fn(next_energies, e, regression_mask)
-                else:
-                    energy_loss = self.energy_ce(e.reshape(-1, e.size(-1)), next_energies.reshape(-1))
+                    if not self.digitize_energy:
+                        regression_mask = ~torch.isin(next_tokens, torch.tensor([self.pad_token, self.SOS_token, self.EOS_token], device=next_tokens.device))
+                        energy_loss = self.energy_loss_fn(next_energies, e, regression_mask)
+                    else:
+                        energy_loss = self.energy_ce(e.reshape(-1, e.size(-1)), next_energies.reshape(-1))
 
                 loss = pixel_loss + energy_loss + load_balance
                 loss.backward()
@@ -226,7 +235,7 @@ class Trainer:
 
             with torch.no_grad():
                 losses = torch.tensor([loss.item(), pixel_loss.item(), energy_loss.item(), load_balance.item()],
-                                    device=self.device)
+                                    device=self.device, dtype=torch.float32)
 
                 dist.all_reduce(losses, op=dist.ReduceOp.SUM)
                 losses /= self.world_size
@@ -265,7 +274,7 @@ class Trainer:
 
                     padding_mask = (tokens == self.pad_token).to(self.device)
 
-                    logits,e = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask)
+                    logits,e,_ = self.model(tokens, energies, initial_energy, material_index, padding_mask=padding_mask)
                     logits = logits[:, skip_idx:, :]
                     e = e[:, skip_idx:, :]
 
@@ -302,12 +311,12 @@ class Trainer:
                 'net_state_dict': self.model.module.state_dict(),
                 'optimizer': self.optimizer.state_dict(),
                 'scheduler': self.scheduler.state_dict(),
-                'epoch': self.epoch + 1,
+                'epoch': self.epoch,
                 'history': self.history,
                 'global_step': self.global_step,
             }, filename)
 
-def run_worker(rank, world_size, config, all_train_files, all_val_files, state_dict=None, run_val=True, write_path=None, checkpoint=None):
+def run_worker(rank, world_size, config, all_train_files, all_val_files, state_dict=None, run_val=False, write_path=None, checkpoint=None):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
@@ -337,7 +346,7 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, state_d
             print(f"Rank {rank} - Loaded model state from checkpoint.")
         if 'optimizer' in checkpoint:
             trainer.optimizer.load_state_dict(checkpoint['optimizer'])
-            trainer.epoch = checkpoint.get('epoch', 0)
+            trainer.epoch = checkpoint.get('epoch', -1) + 1  # Start from the next epoch
             trainer.history = checkpoint.get('history', trainer.history)
             trainer.global_step = checkpoint.get('global_step', 0)
             print(f"Rank {rank} - Loaded optimizer state from checkpoint, starting at epoch {trainer.epoch}.")
@@ -372,7 +381,6 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, state_d
 
             #print("Starting training for epoch", epoch, "chunk", start_idx // chunk_size + 1)
             trainer.train_epoch(train_loader, sampler)
-        
         trainer.scheduler.step()
  
         if run_val:
@@ -381,7 +389,7 @@ def run_worker(rank, world_size, config, all_train_files, all_val_files, state_d
             val_loader, _ = trainer.load_chunked_dataset(all_val_files[random_idx].tolist(),verbose=False)
             trainer.on_epoch_end(val_loader,write_path)
         else:
-            trainer.on_epoch_end(write_path)
+            trainer.on_epoch_end(val_loader=None, write_path=write_path)
 
     dist.destroy_process_group()
 
