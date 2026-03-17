@@ -49,7 +49,8 @@ This generates an HTML file in the `Animations/` folder showing voxels appearing
 
 | Photon | Electron |
 |--------|----------|
-| <iframe src="assets/event_viewer_z_G4_W_gamma.html" width="100%" height="600" frameborder="0"></iframe> | <iframe src="assets/event_viewer_z_G4_W_e-.html" width="100%" height="600" frameborder="0"></iframe> |
+| ![Photon Z-Progression](assets/event_viewer_z_G4_W_gamma.gif) | ![Electron Z-Progression](assets/event_viewer_z_G4_W_e-.gif) |
+
 
 
 ## Energy-Ordered Progression
@@ -67,7 +68,9 @@ This generates an HTML file showing the full cube initially filled with a center
 
 | Photon | Electron |
 |--------|----------|
-| <iframe src="assets/event_viewer_energy_G4_W_gamma.html" width="100%" height="600" frameborder="0"></iframe> | <iframe src="assets/event_viewer_energy_G4_W_e-.html" width="100%" height="600" frameborder="0"></iframe> |
+| ![Photon Energy-Progression](assets/event_viewer_energy_G4_W_gamma.gif) | ![Electron Energy-Progression](assets/event_viewer_energy_G4_W_e-.gif) |
+
+The raw .html files are available for download in the assets folder.
 
 # Example Tokenization
 
